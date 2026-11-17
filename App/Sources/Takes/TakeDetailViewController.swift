@@ -4,12 +4,25 @@ import UIKit
 final class TakeDetailViewController: UIViewController {
     private let take: CaptureTake
 
+    private let scrollView: UIScrollView = {
+        let sv = UIScrollView()
+        sv.translatesAutoresizingMaskIntoConstraints = false
+        sv.alwaysBounceVertical = true
+        return sv
+    }()
+
+    private let contentView: UIView = {
+        let v = UIView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        return v
+    }()
+
     private let summaryTextView: UITextView = {
         let tv = UITextView()
         tv.translatesAutoresizingMaskIntoConstraints = false
         tv.backgroundColor = UIColor(red: 0.06, green: 0.07, blue: 0.09, alpha: 1.0)
         tv.textColor = UIColor(white: 0.92, alpha: 1.0)
-        tv.font = UIFont(name: "Menlo", size: 12) ?? UIFont.systemFont(ofSize: 12)
+        tv.font = UIFont(name: "Menlo", size: 11) ?? UIFont.systemFont(ofSize: 11)
         tv.isEditable = false
         tv.layer.cornerRadius = 8
         tv.layer.borderWidth = 1
@@ -33,7 +46,7 @@ final class TakeDetailViewController: UIViewController {
         btn.translatesAutoresizingMaskIntoConstraints = false
         btn.setTitle("PLAY .MOV", for: .normal)
         btn.setTitleColor(.white, for: .normal)
-        btn.titleLabel?.font = UIFont.systemFont(ofSize: 15, weight: .bold)
+        btn.titleLabel?.font = UIFont.systemFont(ofSize: 14, weight: .bold)
         btn.backgroundColor = UIColor(red: 0.16, green: 0.62, blue: 0.36, alpha: 1.0)
         btn.layer.cornerRadius = 8
         return btn
@@ -44,7 +57,7 @@ final class TakeDetailViewController: UIViewController {
         btn.translatesAutoresizingMaskIntoConstraints = false
         btn.setTitle("SHARE .MOV + .GFRAW", for: .normal)
         btn.setTitleColor(.white, for: .normal)
-        btn.titleLabel?.font = UIFont.systemFont(ofSize: 15, weight: .bold)
+        btn.titleLabel?.font = UIFont.systemFont(ofSize: 14, weight: .bold)
         btn.backgroundColor = UIColor(red: 0.12, green: 0.48, blue: 0.95, alpha: 1.0)
         btn.layer.cornerRadius = 8
         return btn
@@ -53,6 +66,7 @@ final class TakeDetailViewController: UIViewController {
     init(take: CaptureTake) {
         self.take = take
         super.init(nibName: nil, bundle: nil)
+        self.hidesBottomBarWhenPushed = true
     }
 
     required init?(coder: NSCoder) {
@@ -61,7 +75,7 @@ final class TakeDetailViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = String(take.uuid.prefix(8))
+        navigationItem.title = String(take.uuid.prefix(8))
         view.backgroundColor = UIColor(red: 0.09, green: 0.10, blue: 0.12, alpha: 1.0)
 
         setupLayout()
@@ -73,32 +87,42 @@ final class TakeDetailViewController: UIViewController {
     }
 
     private func setupLayout() {
-        view.addSubview(summaryTextView)
-        view.addSubview(stabilizeButton)
-        view.addSubview(playButton)
-        view.addSubview(shareButton)
+        view.addSubview(scrollView)
+        scrollView.addSubview(contentView)
+
+        let stack = UIStackView(arrangedSubviews: [
+            summaryTextView,
+            stabilizeButton,
+            playButton,
+            shareButton
+        ])
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.axis = .vertical
+        stack.spacing = 10
+        contentView.addSubview(stack)
 
         let guide = view.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
-            summaryTextView.topAnchor.constraint(equalTo: guide.topAnchor, constant: 12),
-            summaryTextView.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            summaryTextView.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
-            summaryTextView.bottomAnchor.constraint(equalTo: stabilizeButton.topAnchor, constant: -14),
+            scrollView.topAnchor.constraint(equalTo: guide.topAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: guide.bottomAnchor),
 
-            stabilizeButton.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            stabilizeButton.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
-            stabilizeButton.heightAnchor.constraint(equalToConstant: 48),
-            stabilizeButton.bottomAnchor.constraint(equalTo: playButton.topAnchor, constant: -10),
+            contentView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+            contentView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+            contentView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+            contentView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+            contentView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
 
-            playButton.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            playButton.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
-            playButton.heightAnchor.constraint(equalToConstant: 44),
-            playButton.bottomAnchor.constraint(equalTo: shareButton.topAnchor, constant: -10),
+            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
+            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
+            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -28),
 
-            shareButton.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            shareButton.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
-            shareButton.heightAnchor.constraint(equalToConstant: 44),
-            shareButton.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -12)
+            summaryTextView.heightAnchor.constraint(equalToConstant: 265),
+            stabilizeButton.heightAnchor.constraint(equalToConstant: 46),
+            playButton.heightAnchor.constraint(equalToConstant: 42),
+            shareButton.heightAnchor.constraint(equalToConstant: 42)
         ])
     }
 

@@ -220,11 +220,21 @@ TrajectoryResult TrajectoryEngine::solve(
     }
 
     const double sClamped = std::min(1.0, std::max(0.0, config.smoothness));
-    const double tauBase = 0.05 + sClamped * 1.75;
+    if (sClamped <= 1e-4) {
+        result.smoothFrameQuats = result.rawFrameQuats;
+        result.rawAngularAccelRms = computeAngularAccelRms(result.rawFrameQuats, dtF);
+        result.smoothAngularAccelRms = result.rawAngularAccelRms;
+        result.stabilityImprovementPct = 0.0;
+        result.valid = true;
+        return result;
+    }
+
+    // At smoothness = 0.65, tauBase ~= 0.59s (within 0.45s - 0.65s target range)
+    const double tauBase = 0.02 + sClamped * 0.88;
 
     std::vector<double> alpha(n, 0.0);
     for (size_t i = 0; i < n; ++i) {
-        const double ratio = smoothOmega[i] / 0.8;
+        const double ratio = smoothOmega[i] / 0.55;
         const double tauEff = tauBase / (1.0 + config.velocityDamping * ratio * ratio);
         alpha[i] = std::exp(-dtF / std::max(tauEff, 1e-4));
     }
@@ -247,9 +257,8 @@ TrajectoryResult TrajectoryEngine::solve(
     result.smoothAngularAccelRms = computeAngularAccelRms(result.smoothFrameQuats, dtF);
 
     if (result.rawAngularAccelRms > 1e-9) {
-        const double ratioSq = (result.smoothAngularAccelRms * result.smoothAngularAccelRms) /
-                               (result.rawAngularAccelRms * result.rawAngularAccelRms);
-        result.stabilityImprovementPct = std::min(100.0, std::max(0.0, (1.0 - ratioSq) * 100.0));
+        const double rmsRatio = result.smoothAngularAccelRms / result.rawAngularAccelRms;
+        result.stabilityImprovementPct = std::min(99.5, std::max(0.0, (1.0 - rmsRatio) * 100.0));
     }
     result.valid = true;
     return result;

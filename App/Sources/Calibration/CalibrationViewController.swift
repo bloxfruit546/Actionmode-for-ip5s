@@ -1,12 +1,25 @@
 import UIKit
 
 final class CalibrationViewController: UIViewController {
+    private let scrollView: UIScrollView = {
+        let sv = UIScrollView()
+        sv.translatesAutoresizingMaskIntoConstraints = false
+        sv.alwaysBounceVertical = true
+        return sv
+    }()
+
+    private let contentView: UIView = {
+        let v = UIView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        return v
+    }()
+
     private let infoTextView: UITextView = {
         let tv = UITextView()
         tv.translatesAutoresizingMaskIntoConstraints = false
         tv.backgroundColor = UIColor(red: 0.06, green: 0.07, blue: 0.09, alpha: 1.0)
         tv.textColor = UIColor(white: 0.92, alpha: 1.0)
-        tv.font = UIFont(name: "Menlo", size: 12) ?? UIFont.systemFont(ofSize: 12)
+        tv.font = UIFont(name: "Menlo", size: 11) ?? UIFont.systemFont(ofSize: 11)
         tv.isEditable = false
         tv.layer.cornerRadius = 8
         tv.layer.borderWidth = 1
@@ -37,7 +50,7 @@ final class CalibrationViewController: UIViewController {
         btn.translatesAutoresizingMaskIntoConstraints = false
         btn.setTitle("START 8s STATIC GYRO CALIBRATION", for: .normal)
         btn.setTitleColor(.white, for: .normal)
-        btn.titleLabel?.font = UIFont.systemFont(ofSize: 15, weight: .bold)
+        btn.titleLabel?.font = UIFont.systemFont(ofSize: 14, weight: .bold)
         btn.backgroundColor = UIColor(red: 0.12, green: 0.48, blue: 0.95, alpha: 1.0)
         btn.layer.cornerRadius = 8
         return btn
@@ -56,7 +69,7 @@ final class CalibrationViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "Calibration"
+        navigationItem.title = "Calibration"
         view.backgroundColor = UIColor(red: 0.09, green: 0.10, blue: 0.12, alpha: 1.0)
 
         setupLayout()
@@ -67,35 +80,41 @@ final class CalibrationViewController: UIViewController {
     }
 
     private func setupLayout() {
-        view.addSubview(infoTextView)
-        view.addSubview(statusLabel)
-        view.addSubview(progressView)
-        view.addSubview(calibrateButton)
-        view.addSubview(resetButton)
+        view.addSubview(scrollView)
+        scrollView.addSubview(contentView)
+
+        let stack = UIStackView(arrangedSubviews: [
+            infoTextView,
+            statusLabel,
+            progressView,
+            calibrateButton,
+            resetButton
+        ])
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.axis = .vertical
+        stack.spacing = 12
+        contentView.addSubview(stack)
 
         let guide = view.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
-            infoTextView.topAnchor.constraint(equalTo: guide.topAnchor, constant: 12),
-            infoTextView.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            infoTextView.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
-            infoTextView.heightAnchor.constraint(equalToConstant: 240),
+            scrollView.topAnchor.constraint(equalTo: guide.topAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: guide.bottomAnchor),
 
-            statusLabel.topAnchor.constraint(equalTo: infoTextView.bottomAnchor, constant: 14),
-            statusLabel.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            statusLabel.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
+            contentView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+            contentView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+            contentView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+            contentView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+            contentView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
 
-            progressView.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 10),
-            progressView.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            progressView.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
+            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
+            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
+            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -28),
 
-            calibrateButton.topAnchor.constraint(equalTo: progressView.bottomAnchor, constant: 16),
-            calibrateButton.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            calibrateButton.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
-            calibrateButton.heightAnchor.constraint(equalToConstant: 48),
-
-            resetButton.topAnchor.constraint(equalTo: calibrateButton.bottomAnchor, constant: 10),
-            resetButton.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            resetButton.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
+            infoTextView.heightAnchor.constraint(equalToConstant: 230),
+            calibrateButton.heightAnchor.constraint(equalToConstant: 46),
             resetButton.heightAnchor.constraint(equalToConstant: 40)
         ])
     }

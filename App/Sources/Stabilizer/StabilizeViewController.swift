@@ -7,6 +7,19 @@ final class StabilizeViewController: UIViewController {
     private var isRendering = false
     private var lastExportedURL: URL?
 
+    private let scrollView: UIScrollView = {
+        let sv = UIScrollView()
+        sv.translatesAutoresizingMaskIntoConstraints = false
+        sv.alwaysBounceVertical = true
+        return sv
+    }()
+
+    private let contentView: UIView = {
+        let v = UIView()
+        v.translatesAutoresizingMaskIntoConstraints = false
+        return v
+    }()
+
     private let smoothLabel = UILabel()
     private let smoothSlider = UISlider()
 
@@ -109,6 +122,7 @@ final class StabilizeViewController: UIViewController {
     init(take: CaptureTake) {
         self.take = take
         super.init(nibName: nil, bundle: nil)
+        self.hidesBottomBarWhenPushed = true
     }
 
     required init?(coder: NSCoder) {
@@ -117,7 +131,7 @@ final class StabilizeViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "Stabilize"
+        navigationItem.title = "Stabilize"
         view.backgroundColor = UIColor(red: 0.09, green: 0.10, blue: 0.12, alpha: 1.0)
 
         configureControls()
@@ -163,83 +177,59 @@ final class StabilizeViewController: UIViewController {
     }
 
     private func setupLayout() {
+        view.addSubview(scrollView)
+        scrollView.addSubview(contentView)
+
         let zoomRow = UIStackView(arrangedSubviews: [zoomLabel, unlimitedZoomSwitch])
         zoomRow.translatesAutoresizingMaskIntoConstraints = false
         zoomRow.axis = .horizontal
         zoomRow.alignment = .center
         zoomRow.spacing = 8
 
-        let resultRow = UIStackView(arrangedSubviews: [playButton, savePhotosButton, shareButton])
-        resultRow.translatesAutoresizingMaskIntoConstraints = false
-        resultRow.axis = .horizontal
-        resultRow.spacing = 6
-        resultRow.distribution = .fillEqually
-
-        view.addSubview(smoothLabel)
-        view.addSubview(smoothSlider)
-        view.addSubview(zoomRow)
-        view.addSubview(zoomSlider)
-        view.addSubview(offsetLabel)
-        view.addSubview(offsetSlider)
-        view.addSubview(previewButton)
-        view.addSubview(previewInfoLabel)
-        view.addSubview(progressView)
-        view.addSubview(statusLabel)
-        view.addSubview(renderButton)
-        view.addSubview(resultRow)
+        let stack = UIStackView(arrangedSubviews: [
+            smoothLabel,
+            smoothSlider,
+            zoomRow,
+            zoomSlider,
+            offsetLabel,
+            offsetSlider,
+            previewButton,
+            previewInfoLabel,
+            progressView,
+            statusLabel,
+            renderButton,
+            playButton,
+            savePhotosButton,
+            shareButton
+        ])
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.axis = .vertical
+        stack.spacing = 10
+        contentView.addSubview(stack)
 
         let guide = view.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
-            smoothLabel.topAnchor.constraint(equalTo: guide.topAnchor, constant: 12),
-            smoothLabel.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            smoothLabel.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
+            scrollView.topAnchor.constraint(equalTo: guide.topAnchor),
+            scrollView.leadingAnchor.constraint(equalTo: guide.leadingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: guide.trailingAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: guide.bottomAnchor),
 
-            smoothSlider.topAnchor.constraint(equalTo: smoothLabel.bottomAnchor, constant: 4),
-            smoothSlider.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            smoothSlider.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
+            contentView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+            contentView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+            contentView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+            contentView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+            contentView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
 
-            zoomRow.topAnchor.constraint(equalTo: smoothSlider.bottomAnchor, constant: 12),
-            zoomRow.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            zoomRow.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
+            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 12),
+            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
+            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -28),
 
-            zoomSlider.topAnchor.constraint(equalTo: zoomRow.bottomAnchor, constant: 4),
-            zoomSlider.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            zoomSlider.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
-
-            offsetLabel.topAnchor.constraint(equalTo: zoomSlider.bottomAnchor, constant: 12),
-            offsetLabel.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            offsetLabel.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
-
-            offsetSlider.topAnchor.constraint(equalTo: offsetLabel.bottomAnchor, constant: 4),
-            offsetSlider.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            offsetSlider.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
-
-            previewButton.topAnchor.constraint(equalTo: offsetSlider.bottomAnchor, constant: 14),
-            previewButton.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            previewButton.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
-            previewButton.heightAnchor.constraint(equalToConstant: 36),
-
-            previewInfoLabel.topAnchor.constraint(equalTo: previewButton.bottomAnchor, constant: 10),
-            previewInfoLabel.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            previewInfoLabel.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
-
-            progressView.topAnchor.constraint(equalTo: previewInfoLabel.bottomAnchor, constant: 14),
-            progressView.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            progressView.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
-
-            statusLabel.topAnchor.constraint(equalTo: progressView.bottomAnchor, constant: 8),
-            statusLabel.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            statusLabel.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
-
-            renderButton.topAnchor.constraint(equalTo: statusLabel.bottomAnchor, constant: 14),
-            renderButton.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            renderButton.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
+            previewButton.heightAnchor.constraint(equalToConstant: 38),
             renderButton.heightAnchor.constraint(equalToConstant: 46),
-
-            resultRow.topAnchor.constraint(equalTo: renderButton.bottomAnchor, constant: 10),
-            resultRow.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
-            resultRow.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
-            resultRow.heightAnchor.constraint(equalToConstant: 40)
+            playButton.heightAnchor.constraint(equalToConstant: 42),
+            savePhotosButton.heightAnchor.constraint(equalToConstant: 42),
+            shareButton.heightAnchor.constraint(equalToConstant: 42)
         ])
     }
 

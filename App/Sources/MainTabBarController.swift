@@ -12,12 +12,12 @@ final class MainTabBarController: UITabBarController {
         let cameraVC = CameraViewController()
         cameraVC.tabBarItem = UITabBarItem(title: "Camera", image: nil, tag: 0)
 
-        let takesNav = makeDarkNav(root: TakesListViewController(), title: "Takes", tag: 1)
-        let calibNav = makeDarkNav(root: CalibrationViewController(), title: "Calibrate", tag: 2)
-        let probeNav = makeDarkNav(root: ProbeViewController(), title: "Probe", tag: 3)
+        let takesNav = makeDarkNav(root: TakesListViewController(), tabTitle: "Takes", tag: 1)
+        let calibNav = makeDarkNav(root: CalibrationViewController(), tabTitle: "Calib", tag: 2)
+        let probeNav = makeDarkNav(root: ProbeViewController(), tabTitle: "Probe", tag: 3)
 
         let titleAttrs: [NSAttributedString.Key: Any] = [
-            .font: UIFont.systemFont(ofSize: 13, weight: .bold)
+            .font: UIFont.systemFont(ofSize: 12, weight: .bold)
         ]
         for item in [cameraVC.tabBarItem, takesNav.tabBarItem, calibNav.tabBarItem, probeNav.tabBarItem] {
             item?.setTitleTextAttributes(titleAttrs, for: .normal)
@@ -27,12 +27,12 @@ final class MainTabBarController: UITabBarController {
         viewControllers = [cameraVC, takesNav, calibNav, probeNav]
     }
 
-    private func makeDarkNav(root: UIViewController, title: String, tag: Int) -> UINavigationController {
+    private func makeDarkNav(root: UIViewController, tabTitle: String, tag: Int) -> UINavigationController {
         let nav = UINavigationController(rootViewController: root)
         nav.navigationBar.barStyle = .black
         nav.navigationBar.isTranslucent = false
         nav.navigationBar.tintColor = .white
-        nav.tabBarItem = UITabBarItem(title: title, image: nil, tag: tag)
+        nav.tabBarItem = UITabBarItem(title: tabTitle, image: nil, tag: tag)
         return nav
     }
 }

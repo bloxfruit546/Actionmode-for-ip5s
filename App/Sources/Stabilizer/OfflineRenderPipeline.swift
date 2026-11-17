@@ -19,8 +19,22 @@ struct StabilizeExportResult {
 }
 
 final class OfflineRenderPipeline {
-    private let renderQueue = DispatchQueue(label: "com.gyrostabilizer5s.offlinerender", qos: .userInitiated)
-    private var isCancelled = false
+    private let setupQueue = DispatchQueue(label: "com.gyrostab5s.render.setup", qos: .userInitiated)
+    private let cancelLock = NSLock()
+    private var _isCancelled = false
+
+    private var isCancelled: Bool {
+        get {
+            cancelLock.lock()
+            defer { cancelLock.unlock() }
+            return _isCancelled
+        }
+        set {
+            cancelLock.lock()
+            _isCancelled = newValue
+            cancelLock.unlock()
+        }
+    }
 
     func cancel() {
         isCancelled = true
@@ -53,7 +67,7 @@ final class OfflineRenderPipeline {
         completion: @escaping (Result<StabilizeExportResult, Error>) -> Void
     ) {
         isCancelled = false
-        renderQueue.async { [weak self] in
+        setupQueue.async { [weak self] in
             guard let self = self else { return }
             let startTime = CFAbsoluteTimeGetCurrent()
 
@@ -117,6 +131,8 @@ final class OfflineRenderPipeline {
                 }
 
                 let writer = try AVAssetWriter(outputURL: outURL, fileType: .mov)
+                writer.shouldOptimizeForNetworkUse = false
+
                 let bitrate = (height >= 1000) ? 45_000_000 : 35_000_000
                 let compressionProps: [String: Any] = [
                     AVVideoAverageBitRateKey: bitrate,
@@ -159,133 +175,246 @@ final class OfflineRenderPipeline {
                     }
                 }
 
-                guard reader.startReading(), writer.startWriting() else {
-                    throw self.makeError("Failed to start AVAssetReader/Writer.")
+                guard reader.startReading() else {
+                    throw self.makeError("AVAssetReader startReading failed: \(reader.error?.localizedDescription ?? "unknown")")
+                }
+                guard writer.startWriting() else {
+                    reader.cancelReading()
+                    throw self.makeError("AVAssetWriter startWriting failed: \(writer.error?.localizedDescription ?? "unknown")")
                 }
                 writer.startSession(atSourceTime: .zero)
 
+                FileLogger.shared.log("OfflineRender STARTED: \(take.uuid) (\(width)x\(height), ~\(totalFrames) frames, audio=\(audioWriterIn != nil))")
+
+                let videoRenderQueue = DispatchQueue(label: "com.gyrostab5s.render.video", qos: .userInitiated)
+                let audioRenderQueue = DispatchQueue(label: "com.gyrostab5s.render.audio", qos: .userInitiated)
+                let muxGroup = DispatchGroup()
+                let stateLock = NSLock()
+
+                var videoFinished = false
+                var audioFinished = (audioReaderOut == nil || audioWriterIn == nil)
                 var frameIndex = 0
+                var lastLoggedDecile = -1
                 var peakRamMB = Double(GFSystemProbe.currentPhysFootprintBytes()) / (1024.0 * 1024.0)
+                var renderError: Error?
 
-                // Render video frames sequentially inside autoreleasepool
-                while !self.isCancelled {
-                    var didFinishVideo = false
-                    autoreleasepool {
-                        guard let sample = videoReaderOut.copyNextSampleBuffer() else {
-                            didFinishVideo = true
-                            return
+                let finishVideoOnce: (Error?) -> Void = { err in
+                    stateLock.lock()
+                    let shouldLeave = !videoFinished
+                    if shouldLeave {
+                        videoFinished = true
+                        if let e = err, renderError == nil {
+                            renderError = e
                         }
-                        guard let srcPB = CMSampleBufferGetImageBuffer(sample) else {
-                            return
-                        }
-                        let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+                    }
+                    stateLock.unlock()
 
-                        while !videoWriterIn.isReadyForMoreMediaData && !self.isCancelled {
-                            Thread.sleep(forTimeInterval: 0.002)
+                    if shouldLeave {
+                        videoWriterIn.markAsFinished()
+                        FileLogger.shared.log("OfflineRender: Video track finished (\(frameIndex) frames).")
+                        muxGroup.leave()
+                    }
+                }
+
+                let finishAudioOnce: (Error?) -> Void = { err in
+                    stateLock.lock()
+                    let shouldLeave = !audioFinished
+                    if shouldLeave {
+                        audioFinished = true
+                        if let e = err, renderError == nil {
+                            renderError = e
                         }
+                    }
+                    stateLock.unlock()
+
+                    if shouldLeave {
+                        audioWriterIn?.markAsFinished()
+                        FileLogger.shared.log("OfflineRender: Audio track finished.")
+                        muxGroup.leave()
+                    }
+                }
+
+                muxGroup.enter()
+                videoWriterIn.requestMediaDataWhenReady(on: videoRenderQueue) { [weak self] in
+                    guard let self = self else {
+                        finishVideoOnce(nil)
+                        return
+                    }
+
+                    while videoWriterIn.isReadyForMoreMediaData {
                         if self.isCancelled {
+                            reader.cancelReading()
+                            finishVideoOnce(self.makeError("Render cancelled by user."))
                             return
                         }
 
-                        guard let pool = adaptor.pixelBufferPool else {
-                            return
-                        }
-                        var dstPBOpt: CVPixelBuffer?
-                        let status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &dstPBOpt)
-                        guard status == kCVReturnSuccess, let dstPB = dstPBOpt else {
-                            return
-                        }
+                        var loopError: Error?
+                        var reachedEnd = false
 
-                        _ = bridge.warpPixelBuffer(srcPB, into: dstPB, frameIndex: UInt(frameIndex))
-                        _ = adaptor.append(dstPB, withPresentationTime: pts)
-
-                        frameIndex += 1
-                        if frameIndex % 30 == 0 {
-                            bridge.flushTextureCache()
-                        }
-
-                        let ramMB = Double(GFSystemProbe.currentPhysFootprintBytes()) / (1024.0 * 1024.0)
-                        if ramMB > peakRamMB {
-                            peakRamMB = ramMB
-                        }
-                        if frameIndex % 5 == 0 || frameIndex == totalFrames {
-                            let frac = min(1.0, Double(frameIndex) / Double(totalFrames))
-                            let curIdx = frameIndex
-                            DispatchQueue.main.async {
-                                progress(frac, curIdx, totalFrames, ramMB)
-                            }
-                        }
-                    }
-                    if didFinishVideo {
-                        break
-                    }
-                }
-
-                if self.isCancelled {
-                    reader.cancelReading()
-                    writer.cancelWriting()
-                    try? FileManager.default.removeItem(at: outURL)
-                    DispatchQueue.main.async {
-                        completion(.failure(self.makeError("Render cancelled by user.")))
-                    }
-                    return
-                }
-
-                videoWriterIn.markAsFinished()
-
-                // Audio passthrough
-                if let aOut = audioReaderOut, let aIn = audioWriterIn {
-                    while !self.isCancelled {
-                        var didFinishAudio = false
                         autoreleasepool {
-                            guard let aSample = aOut.copyNextSampleBuffer() else {
-                                didFinishAudio = true
+                            guard let sample = videoReaderOut.copyNextSampleBuffer() else {
+                                if reader.status == .failed {
+                                    loopError = reader.error ?? self.makeError("AVAssetReader video read failed.")
+                                }
+                                reachedEnd = true
                                 return
                             }
-                            while !aIn.isReadyForMoreMediaData && !self.isCancelled {
-                                Thread.sleep(forTimeInterval: 0.002)
+
+                            guard let srcPB = CMSampleBufferGetImageBuffer(sample) else {
+                                return
                             }
-                            if !self.isCancelled {
-                                aIn.append(aSample)
+                            let pts = CMSampleBufferGetPresentationTimeStamp(sample)
+
+                            guard let pool = adaptor.pixelBufferPool else {
+                                loopError = self.makeError("AVAssetWriterInputPixelBufferAdaptor pixelBufferPool is nil.")
+                                return
+                            }
+
+                            var dstPBOpt: CVPixelBuffer?
+                            let pbStatus = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &dstPBOpt)
+                            guard pbStatus == kCVReturnSuccess, let dstPB = dstPBOpt else {
+                                loopError = self.makeError("CVPixelBufferPoolCreatePixelBuffer failed (status=\(pbStatus)).")
+                                return
+                            }
+
+                            let warped = bridge.warpPixelBuffer(srcPB, into: dstPB, frameIndex: UInt(frameIndex))
+                            if !warped {
+                                loopError = self.makeError("Metal warpPixelBuffer failed at frame \(frameIndex).")
+                                return
+                            }
+
+                            if !adaptor.append(dstPB, withPresentationTime: pts) {
+                                let wErr = writer.error?.localizedDescription ?? "unknown writer error"
+                                FileLogger.shared.log("OfflineRender ERROR: adaptor.append failed at frame \(frameIndex): \(wErr)")
+                                loopError = writer.error ?? self.makeError("AVAssetWriter append failed: \(wErr)")
+                                return
+                            }
+
+                            frameIndex += 1
+                            let ramMB = Double(GFSystemProbe.currentPhysFootprintBytes()) / (1024.0 * 1024.0)
+                            if ramMB > peakRamMB {
+                                peakRamMB = ramMB
+                            }
+
+                            let frac = min(1.0, Double(frameIndex) / Double(totalFrames))
+                            let decile = Int(frac * 10.0)
+                            if decile > lastLoggedDecile {
+                                lastLoggedDecile = decile
+                                FileLogger.shared.log(String(format: "OfflineRender: %d%% (%d/%d) | RAM=%.1f MB", decile * 10, frameIndex, totalFrames, ramMB))
+                            }
+
+                            if frameIndex % 5 == 0 || frameIndex == totalFrames {
+                                let curIdx = frameIndex
+                                DispatchQueue.main.async {
+                                    progress(frac, curIdx, totalFrames, ramMB)
+                                }
                             }
                         }
-                        if didFinishAudio {
-                            break
+
+                        if let err = loopError {
+                            reader.cancelReading()
+                            finishVideoOnce(err)
+                            return
+                        }
+                        if reachedEnd {
+                            finishVideoOnce(nil)
+                            return
                         }
                     }
-                    aIn.markAsFinished()
                 }
 
-                let sem = DispatchSemaphore(value: 0)
-                writer.finishWriting {
-                    sem.signal()
-                }
-                sem.wait()
+                if let aOut = audioReaderOut, let aIn = audioWriterIn {
+                    muxGroup.enter()
+                    aIn.requestMediaDataWhenReady(on: audioRenderQueue) { [weak self] in
+                        guard let self = self else {
+                            finishAudioOnce(nil)
+                            return
+                        }
 
-                bridge.flushTextureCache()
+                        while aIn.isReadyForMoreMediaData {
+                            if self.isCancelled {
+                                finishAudioOnce(nil)
+                                return
+                            }
 
-                if writer.status == .completed {
-                    let elapsed = CFAbsoluteTimeGetCurrent() - startTime
-                    let res = StabilizeExportResult(
-                        outputURL: outURL,
-                        plan: plan,
-                        renderedFrames: frameIndex,
-                        elapsedSeconds: elapsed,
-                        peakRamMB: peakRamMB
-                    )
-                    FileLogger.shared.log(String(
-                        format: "Stabilize Export DONE: %d frames in %.2fs (%.1f fps) | PeakRAM=%.1f MB | Gain=%.1f%%",
-                        frameIndex, elapsed, Double(frameIndex) / max(elapsed, 0.01),
-                        peakRamMB, plan.stabilityImprovementPct
-                    ))
-                    DispatchQueue.main.async {
-                        completion(.success(res))
+                            var audioErr: Error?
+                            var reachedEnd = false
+
+                            autoreleasepool {
+                                guard let aSample = aOut.copyNextSampleBuffer() else {
+                                    if reader.status == .failed {
+                                        audioErr = reader.error ?? self.makeError("AVAssetReader audio read failed.")
+                                    }
+                                    reachedEnd = true
+                                    return
+                                }
+
+                                if !aIn.append(aSample) {
+                                    let wErr = writer.error?.localizedDescription ?? "unknown audio append error"
+                                    FileLogger.shared.log("OfflineRender ERROR: audio append failed: \(wErr)")
+                                    audioErr = writer.error ?? self.makeError("Audio append failed: \(wErr)")
+                                    return
+                                }
+                            }
+
+                            if let err = audioErr {
+                                finishAudioOnce(err)
+                                return
+                            }
+                            if reachedEnd {
+                                finishAudioOnce(nil)
+                                return
+                            }
+                        }
                     }
-                } else {
-                    throw self.makeError(writer.error?.localizedDescription ?? "AVAssetWriter failed.")
+                }
+
+                muxGroup.notify(queue: DispatchQueue.global(qos: .userInitiated)) {
+                    bridge.flushTextureCache()
+
+                    if self.isCancelled || renderError != nil {
+                        reader.cancelReading()
+                        writer.cancelWriting()
+                        try? FileManager.default.removeItem(at: outURL)
+                        let finalErr = renderError ?? self.makeError("Render cancelled by user.")
+                        FileLogger.shared.log("OfflineRender ABORTED: \(finalErr.localizedDescription)")
+                        DispatchQueue.main.async {
+                            completion(.failure(finalErr))
+                        }
+                        return
+                    }
+
+                    writer.finishWriting {
+                        if writer.status == .completed {
+                            let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+                            let res = StabilizeExportResult(
+                                outputURL: outURL,
+                                plan: plan,
+                                renderedFrames: frameIndex,
+                                elapsedSeconds: elapsed,
+                                peakRamMB: peakRamMB
+                            )
+                            FileLogger.shared.log(String(
+                                format: "OfflineRender DONE: %d frames in %.2fs (%.1f fps) | PeakRAM=%.1f MB | Gain=%.1f%%",
+                                frameIndex, elapsed, Double(frameIndex) / max(elapsed, 0.01),
+                                peakRamMB, plan.stabilityImprovementPct
+                            ))
+                            DispatchQueue.main.async {
+                                completion(.success(res))
+                            }
+                        } else {
+                            let wErr = writer.error ?? self.makeError("AVAssetWriter finishWriting failed (status=\(writer.status.rawValue)).")
+                            try? FileManager.default.removeItem(at: outURL)
+                            FileLogger.shared.log("OfflineRender FAILED: \(wErr.localizedDescription)")
+                            DispatchQueue.main.async {
+                                completion(.failure(wErr))
+                            }
+                        }
+                    }
                 }
             } catch {
                 try? FileManager.default.removeItem(at: outURL)
+                FileLogger.shared.log("OfflineRender SETUP ERROR: \(error.localizedDescription)")
                 DispatchQueue.main.async {
                     completion(.failure(error))
                 }

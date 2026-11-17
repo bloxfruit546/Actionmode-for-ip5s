@@ -75,8 +75,14 @@ void testStabilizerJitterAndPanAndZeroBlackBorder() {
     gf::TrajectoryEngine engine;
     engine.setImuData(hdr, gyro, accel);
 
+    gf::StabilizerConfig cfgZero;
+    cfgZero.smoothness = 0.0;
+    const gf::TrajectoryResult trajZero = engine.solve(frames, cfgZero);
+    assert(trajZero.valid);
+    assert(trajZero.stabilityImprovementPct < 1e-6);
+
     gf::StabilizerConfig cfg;
-    cfg.smoothness = 0.50;
+    cfg.smoothness = 0.65;
     cfg.velocityDamping = 1.0;
     cfg.maxZoomLimit = 0.0; // Unlimited safe zoom -> 0% black border guaranteed
 
@@ -84,7 +90,7 @@ void testStabilizerJitterAndPanAndZeroBlackBorder() {
     assert(traj.valid);
     assert(traj.rawFrameQuats.size() == frames.size());
     assert(traj.smoothFrameQuats.size() == frames.size());
-    assert(traj.stabilityImprovementPct > 70.0);
+    assert(traj.stabilityImprovementPct > 70.0 && traj.stabilityImprovementPct <= 99.5);
 
     const gf::CalibrationProfile prof = gf::CalibrationProfile::defaultIPhone5s1080p30();
     const gf::WarpComputationResult warp = gf::FrameWarpCalculator::computeAllFrames(

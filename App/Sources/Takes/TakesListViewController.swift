@@ -11,7 +11,7 @@ final class TakesListViewController: UITableViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "Takes"
+        navigationItem.title = "Takes"
         tableView.backgroundColor = UIColor(red: 0.09, green: 0.10, blue: 0.12, alpha: 1.0)
         tableView.separatorColor = UIColor(white: 0.22, alpha: 1.0)
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "TakeCell")

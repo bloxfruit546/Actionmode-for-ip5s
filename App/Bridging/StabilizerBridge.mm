@@ -267,10 +267,21 @@ struct GFWarpUniformsMetal {
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
 
+    srcYTex = nil;
+    srcUVTex = nil;
+    dstYTex = nil;
+    dstUVTex = nil;
+
     CFRelease(srcYRef);
+    srcYRef = nullptr;
     CFRelease(srcUVRef);
+    srcUVRef = nullptr;
     CFRelease(dstYRef);
+    dstYRef = nullptr;
     CFRelease(dstUVRef);
+    dstUVRef = nullptr;
+
+    CVMetalTextureCacheFlush(_textureCache, 0);
 
     return (cmdBuf.status == MTLCommandBufferStatusCompleted);
 }
