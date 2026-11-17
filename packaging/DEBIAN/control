@@ -1,0 +1,9 @@
+Package: com.gyrostabilizer5s.app
+Name: GyroStabilizer5s
+Version: 0.1.0
+Architecture: iphoneos-arm
+Description: Hardware-accelerated gyro stabilization and horizon lock for iPhone 5s (A7 / iOS 12).
+Maintainer: GyroStabilizer5s
+Author: GyroStabilizer5s
+Section: Multimedia
+Depends: firmware (>= 12.0)

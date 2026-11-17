@@ -1,0 +1,43 @@
+name: GyroStabilizer5s
+options:
+  bundleIdPrefix: com.gyrostabilizer5s
+  deploymentTarget:
+    iOS: "12.0"
+
+settings:
+  base:
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: NO
+    IPHONEOS_DEPLOYMENT_TARGET: "12.0"
+    CLANG_CXX_LANGUAGE_STANDARD: c++17
+    CLANG_CXX_LIBRARY: libc++
+    SWIFT_VERSION: "5.0"
+    ENABLE_BITCODE: NO
+    GCC_C_LANGUAGE_STANDARD: c11
+
+targets:
+  GyroStabilizer5s:
+    type: application
+    platform: iOS
+    sources:
+      - path: App/Sources
+      - path: App/Bridging
+      - path: App/Shaders
+      - path: CoreCPP/src
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.gyrostabilizer5s.app
+        INFOPLIST_FILE: App/Info.plist
+        CODE_SIGN_ENTITLEMENTS: entitlements.plist
+        SWIFT_OBJC_BRIDGING_HEADER: App/Bridging/GyroStabilizer5s-Bridging-Header.h
+        HEADER_SEARCH_PATHS: $(SRCROOT)/CoreCPP/include
+        CODE_SIGNING_ALLOWED: NO
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGN_IDENTITY: ""
+    dependencies:
+      - sdk: AVFoundation.framework
+      - sdk: CoreMotion.framework
+      - sdk: CoreVideo.framework
+      - sdk: Metal.framework
+      - sdk: Photos.framework
+      - sdk: UIKit.framework
