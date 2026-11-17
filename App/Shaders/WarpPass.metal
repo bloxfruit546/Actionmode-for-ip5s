@@ -1,12 +1,20 @@
 #include <metal_stdlib>
 using namespace metal;
 
-struct WarpUniforms {
+struct RowSlice {
     float4 hRow0;
     float4 hRow1;
     float4 hRow2;
+};
+
+struct WarpFrameUniforms {
+    RowSlice slices[16];
     uint2 outSize;
     uint2 inSize;
+    uint2 lumaOutSize;
+    uint2 lumaInSize;
+    float4 intrinsics; // (fx, fy, cx, cy)
+    float4 distortion; // (k1, k2, p1, p2)
 };
 
 inline float sinc_f(float x) {
@@ -33,26 +41,66 @@ inline float lanczos2_weight(float x) {
     return sinc_f(x) * sinc_f(x * 0.5f);
 }
 
+inline float2 solveRollingShutterAndDistort(
+    float dstLumaX,
+    float dstLumaY,
+    constant WarpFrameUniforms& u
+) {
+    const float outHMinus1 = max(float(u.lumaOutSize.y) - 1.0f, 1.0f);
+    const float inHMinus1 = max(float(u.lumaInSize.y) - 1.0f, 1.0f);
+    float rowNorm = clamp(dstLumaY / outHMinus1, 0.0f, 1.0f);
+
+    const float3 dstP = float3(dstLumaX, dstLumaY, 1.0f);
+    float sx = dstLumaX;
+    float sy = dstLumaY;
+
+    // 3-iteration fixed-point solver for per-row rolling shutter convergence (< 0.01 px)
+    for (int iter = 0; iter < 3; ++iter) {
+        const float fIdx = clamp(rowNorm * 15.0f, 0.0f, 15.0f);
+        const int i0 = min(int(floor(fIdx)), 14);
+        const float t = fIdx - float(i0);
+
+        const float3 r0 = mix(u.slices[i0].hRow0.xyz, u.slices[i0 + 1].hRow0.xyz, t);
+        const float3 r1 = mix(u.slices[i0].hRow1.xyz, u.slices[i0 + 1].hRow1.xyz, t);
+        const float3 r2 = mix(u.slices[i0].hRow2.xyz, u.slices[i0 + 1].hRow2.xyz, t);
+
+        const float w = dot(r2, dstP);
+        const float invW = 1.0f / max(w, 1e-5f);
+        sx = dot(r0, dstP) * invW;
+        sy = dot(r1, dstP) * invW;
+        rowNorm = clamp(sy / inHMinus1, 0.0f, 1.0f);
+    }
+
+    // Apply radial Brown-Conrady lens distortion model if non-zero
+    const float k1 = u.distortion.x;
+    const float k2 = u.distortion.y;
+    if (fabs(k1) > 1e-6f || fabs(k2) > 1e-6f) {
+        const float xn = (sx - u.intrinsics.z) / u.intrinsics.x;
+        const float yn = (sy - u.intrinsics.w) / u.intrinsics.y;
+        const float r2 = xn * xn + yn * yn;
+        const float radial = 1.0f + k1 * r2 + k2 * r2 * r2;
+        sx = xn * radial * u.intrinsics.x + u.intrinsics.z;
+        sy = yn * radial * u.intrinsics.y + u.intrinsics.w;
+    }
+
+    return float2(sx, sy);
+}
+
 kernel void lanczos4_warp_luma(
     texture2d<float, access::read> inTex [[texture(0)]],
     texture2d<float, access::write> outTex [[texture(1)]],
-    constant WarpUniforms& u [[buffer(0)]],
+    constant WarpFrameUniforms& u [[buffer(0)]],
     uint2 gid [[thread_position_in_grid]])
 {
     if (gid.x >= u.outSize.x || gid.y >= u.outSize.y) {
         return;
     }
 
-    const float3 dstP = float3(float(gid.x), float(gid.y), 1.0f);
-    const float w = dot(u.hRow2.xyz, dstP);
-    const float invW = 1.0f / max(w, 1e-5f);
-    const float sx = dot(u.hRow0.xyz, dstP) * invW;
-    const float sy = dot(u.hRow1.xyz, dstP) * invW;
-
-    const int ix = int(floor(sx));
-    const int iy = int(floor(sy));
-    const float fx = sx - float(ix);
-    const float fy = sy - float(iy);
+    const float2 src = solveRollingShutterAndDistort(float(gid.x), float(gid.y), u);
+    const int ix = int(floor(src.x));
+    const int iy = int(floor(src.y));
+    const float fx = src.x - float(ix);
+    const float fy = src.y - float(iy);
 
     float wx[8];
     for (int k = 0; k < 8; ++k) {
@@ -82,7 +130,7 @@ kernel void lanczos4_warp_luma(
 kernel void lanczos4_warp_chroma(
     texture2d<float, access::read> inTex [[texture(0)]],
     texture2d<float, access::write> outTex [[texture(1)]],
-    constant WarpUniforms& u [[buffer(0)]],
+    constant WarpFrameUniforms& u [[buffer(0)]],
     uint2 gid [[thread_position_in_grid]])
 {
     if (gid.x >= u.outSize.x || gid.y >= u.outSize.y) {
@@ -90,14 +138,9 @@ kernel void lanczos4_warp_chroma(
     }
 
     const float2 lumaDst = float2(gid) * 2.0f + 0.5f;
-    const float3 dstP = float3(lumaDst.x, lumaDst.y, 1.0f);
-    const float w = dot(u.hRow2.xyz, dstP);
-    const float invW = 1.0f / max(w, 1e-5f);
-    const float sxLuma = dot(u.hRow0.xyz, dstP) * invW;
-    const float syLuma = dot(u.hRow1.xyz, dstP) * invW;
-
-    const float sx = (sxLuma - 0.5f) * 0.5f;
-    const float sy = (syLuma - 0.5f) * 0.5f;
+    const float2 srcLuma = solveRollingShutterAndDistort(lumaDst.x, lumaDst.y, u);
+    const float sx = (srcLuma.x - 0.5f) * 0.5f;
+    const float sy = (srcLuma.y - 0.5f) * 0.5f;
 
     const int ix = int(floor(sx));
     const int iy = int(floor(sy));

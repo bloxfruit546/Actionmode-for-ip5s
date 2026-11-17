@@ -9,11 +9,20 @@
 namespace gf {
 
 struct StabilizerConfig {
-    double smoothness = 0.65;        // [0.0, 1.0] -> maps to tau_base in [0.05s, 1.80s]
+    double smoothness = 0.65;        // Legacy fallback if per-axis not overridden
+    double pitchSmoothness = 0.65;   // [0.0, 1.0]
+    double yawSmoothness = 0.65;     // [0.0, 1.0]
+    double rollSmoothness = 0.75;    // [0.0, 1.0]
     double velocityDamping = 1.0;    // Reduces tau during intentional fast pans
-    double timeOffsetMs = 0.0;       // Fine sync offset in [-50.0, +50.0] ms
+    double timeOffsetMs = 0.0;       // Fine sync offset in [-80.0, +80.0] ms
     double maxZoomLimit = 1.35;      // <= 1.0 disables cap (unlimited safe zoom)
-    int cameraOrientationMode = 0;   // 0 = LandscapeLeft (standard iPhone 5s rear cam)
+    bool horizonLockEnabled = false;
+    double horizonLockAmount = 1.0;  // [0.0, 1.0]
+    double horizonTiltOffsetDeg = 0.0;
+    bool rollingShutterCorrection = true;
+    bool dynamicZoomEnabled = true;
+    double axisMatrix[9] = {0, -1, 0, -1, 0, 0, 0, 0, -1};
+    bool hasCustomAxisMatrix = false;
 };
 
 struct TrajectoryResult {
@@ -31,7 +40,8 @@ public:
     void setImuData(
         const GFFileHeader& header,
         const std::vector<GFGyroRecord>& gyroRecords,
-        const std::vector<GFAccelRecord>& accelRecords
+        const std::vector<GFAccelRecord>& accelRecords,
+        const double* customAxisMatrix = nullptr
     );
 
     Quat sampleRawQuaternionAt(double timestampSec) const;
@@ -49,6 +59,7 @@ private:
     };
 
     std::vector<ImuSample> integratedSamples_;
+    Vec3 initGravityCam_{0.0, 1.0, 0.0};
     double nominalFps_ = 30.0;
 };
 

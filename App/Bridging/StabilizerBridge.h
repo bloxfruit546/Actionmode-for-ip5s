@@ -3,6 +3,21 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+@interface GFOpticalSyncResultObjC : NSObject
+@property (nonatomic, assign) BOOL valid;
+@property (nonatomic, assign) double bestOffsetMs;
+@property (nonatomic, assign) double bestNCC;
+@property (nonatomic, assign) NSInteger bestAxisPresetIndex;
+@property (nonatomic, copy) NSString *axisPresetName;
+@property (nonatomic, copy) NSString *diagnosticMessage;
+@end
+
+@interface GFOpticalSyncCollectorBridge : NSObject
+- (void)reset;
+- (void)addLumaPixelBuffer:(CVPixelBufferRef)pixelBuffer timestampSec:(double)ts;
+- (GFOpticalSyncResultObjC *)solveWithSidecarPath:(NSString *)sidecarPath;
+@end
+
 @interface GFStabilizerPlanObjC : NSObject
 @property (nonatomic, assign) BOOL valid;
 @property (nonatomic, assign) NSUInteger frameCount;
@@ -21,10 +36,18 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly) GFStabilizerPlanObjC *plan;
 
 - (nullable instancetype)initWithSidecarPath:(NSString *)sidecarPath
-                                  smoothness:(double)smoothness
+                             pitchSmoothness:(double)pitchSmoothness
+                               yawSmoothness:(double)yawSmoothness
+                              rollSmoothness:(double)rollSmoothness
                              velocityDamping:(double)damping
                                 timeOffsetMs:(double)offsetMs
-                                maxZoomLimit:(double)maxZoomLimit;
+                                maxZoomLimit:(double)maxZoomLimit
+                          horizonLockEnabled:(BOOL)horizonLockEnabled
+                           horizonLockAmount:(double)horizonLockAmount
+                        horizonTiltOffsetDeg:(double)horizonTiltOffsetDeg
+                    rollingShutterCorrection:(BOOL)rollingShutterCorrection
+                          dynamicZoomEnabled:(BOOL)dynamicZoomEnabled
+                             axisPresetIndex:(NSInteger)axisPresetIndex;
 
 - (BOOL)warpPixelBuffer:(CVPixelBufferRef)srcPixelBuffer
         intoPixelBuffer:(CVPixelBufferRef)dstPixelBuffer

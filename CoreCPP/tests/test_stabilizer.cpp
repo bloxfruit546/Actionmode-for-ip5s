@@ -76,7 +76,9 @@ void testStabilizerJitterAndPanAndZeroBlackBorder() {
     engine.setImuData(hdr, gyro, accel);
 
     gf::StabilizerConfig cfgZero;
-    cfgZero.smoothness = 0.0;
+    cfgZero.pitchSmoothness = 0.0;
+    cfgZero.yawSmoothness = 0.0;
+    cfgZero.rollSmoothness = 0.0;
     const gf::TrajectoryResult trajZero = engine.solve(frames, cfgZero);
     assert(trajZero.valid);
     assert(trajZero.stabilityImprovementPct < 1e-6);

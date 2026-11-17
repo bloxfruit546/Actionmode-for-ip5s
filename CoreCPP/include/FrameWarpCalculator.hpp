@@ -2,19 +2,28 @@
 
 #include "CalibrationProfile.hpp"
 #include "Quaternion.hpp"
+#include "TrajectoryEngine.hpp"
 
 #include <cstdint>
 #include <vector>
 
 namespace gf {
 
+static constexpr int kRollingShutterSlices = 16;
+
 struct GFWarpMatrixPacket {
-    float m[9]; // Row-major 3x3 inverse homography H_inv: dst pixel (u,v,1) -> src pixel (u_s, v_s, w_s)
+    float m[9]; // Center-row 3x3 inverse homography H_inv
+    float zoomUsed;
+};
+
+struct GFWarpFrameLUT {
+    float sliceH[kRollingShutterSlices][9]; // 16-slice per-row inverse homography LUT
     float zoomUsed;
 };
 
 struct WarpComputationResult {
     std::vector<GFWarpMatrixPacket> packets;
+    std::vector<GFWarpFrameLUT> frameLUTs;
     double minZoom = 1.0;
     double maxZoom = 1.0;
     double avgZoom = 1.0;
@@ -51,6 +60,16 @@ public:
         const CalibrationProfile& profile,
         double nominalFps,
         double maxZoomLimit
+    );
+
+    static WarpComputationResult computeAllFramesWithRollingShutter(
+        const TrajectoryEngine& engine,
+        const TrajectoryResult& traj,
+        const CalibrationProfile& profile,
+        double nominalFps,
+        double maxZoomLimit,
+        bool rollingShutterCorrection,
+        bool dynamicZoomEnabled
     );
 };
 

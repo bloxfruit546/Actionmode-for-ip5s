@@ -6,6 +6,7 @@ final class StabilizeViewController: UIViewController {
     private let pipeline = OfflineRenderPipeline()
     private var isRendering = false
     private var lastExportedURL: URL?
+    private var detectedAxisPresetIndex: Int = -1
 
     private let scrollView: UIScrollView = {
         let sv = UIScrollView()
@@ -20,12 +21,50 @@ final class StabilizeViewController: UIViewController {
         return v
     }()
 
-    private let smoothLabel = UILabel()
-    private let smoothSlider = UISlider()
+    private let autoSyncButton: UIButton = {
+        let btn = UIButton(type: .system)
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        btn.setTitle("AUTO-SYNC & VERIFY AXES", for: .normal)
+        btn.setTitleColor(.white, for: .normal)
+        btn.titleLabel?.font = UIFont.systemFont(ofSize: 13, weight: .bold)
+        btn.backgroundColor = UIColor(red: 0.45, green: 0.28, blue: 0.85, alpha: 1.0)
+        btn.layer.cornerRadius = 8
+        return btn
+    }()
+
+    private let autoSyncLabel: UILabel = {
+        let l = UILabel()
+        l.translatesAutoresizingMaskIntoConstraints = false
+        l.font = UIFont(name: "Menlo", size: 11) ?? UIFont.systemFont(ofSize: 11)
+        l.textColor = UIColor(white: 0.80, alpha: 1.0)
+        l.numberOfLines = 0
+        l.text = "Axis: Default (-y,-x,-z) | Offset: 0.0 ms"
+        return l
+    }()
+
+    private let pitchLabel = UILabel()
+    private let pitchSlider = UISlider()
+
+    private let yawLabel = UILabel()
+    private let yawSlider = UISlider()
+
+    private let rollLabel = UILabel()
+    private let rollSlider = UISlider()
 
     private let zoomLabel = UILabel()
     private let zoomSlider = UISlider()
     private let unlimitedZoomSwitch = UISwitch()
+
+    private let dynamicZoomLabel = UILabel()
+    private let dynamicZoomSwitch = UISwitch()
+
+    private let horizonLabel = UILabel()
+    private let horizonSwitch = UISwitch()
+    private let tiltLabel = UILabel()
+    private let tiltSlider = UISlider()
+
+    private let rsLabel = UILabel()
+    private let rsSwitch = UISwitch()
 
     private let offsetLabel = UILabel()
     private let offsetSlider = UISlider()
@@ -141,34 +180,36 @@ final class StabilizeViewController: UIViewController {
     }
 
     private func configureControls() {
-        for lbl in [smoothLabel, zoomLabel, offsetLabel] {
+        for lbl in [pitchLabel, yawLabel, rollLabel, zoomLabel, dynamicZoomLabel, horizonLabel, tiltLabel, rsLabel, offsetLabel] {
             lbl.translatesAutoresizingMaskIntoConstraints = false
-            lbl.font = UIFont(name: "Menlo-Bold", size: 12) ?? UIFont.systemFont(ofSize: 12, weight: .bold)
+            lbl.font = UIFont(name: "Menlo-Bold", size: 11) ?? UIFont.systemFont(ofSize: 11, weight: .bold)
             lbl.textColor = .white
         }
 
-        smoothSlider.translatesAutoresizingMaskIntoConstraints = false
-        smoothSlider.minimumValue = 0.0
-        smoothSlider.maximumValue = 1.0
-        smoothSlider.value = 0.65
-        smoothSlider.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
-
-        zoomSlider.translatesAutoresizingMaskIntoConstraints = false
-        zoomSlider.minimumValue = 1.05
-        zoomSlider.maximumValue = 1.60
-        zoomSlider.value = 1.35
-        zoomSlider.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
+        configureSlider(pitchSlider, min: 0.0, max: 1.0, val: 0.65)
+        configureSlider(yawSlider, min: 0.0, max: 1.0, val: 0.65)
+        configureSlider(rollSlider, min: 0.0, max: 1.0, val: 0.75)
+        configureSlider(zoomSlider, min: 1.05, max: 1.60, val: 1.35)
+        configureSlider(tiltSlider, min: -15.0, max: 15.0, val: 0.0)
+        configureSlider(offsetSlider, min: -80.0, max: 80.0, val: 0.0)
 
         unlimitedZoomSwitch.translatesAutoresizingMaskIntoConstraints = false
         unlimitedZoomSwitch.isOn = false
         unlimitedZoomSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
 
-        offsetSlider.translatesAutoresizingMaskIntoConstraints = false
-        offsetSlider.minimumValue = -50.0
-        offsetSlider.maximumValue = 50.0
-        offsetSlider.value = 0.0
-        offsetSlider.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
+        dynamicZoomSwitch.translatesAutoresizingMaskIntoConstraints = false
+        dynamicZoomSwitch.isOn = true
+        dynamicZoomSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
 
+        horizonSwitch.translatesAutoresizingMaskIntoConstraints = false
+        horizonSwitch.isOn = false
+        horizonSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
+
+        rsSwitch.translatesAutoresizingMaskIntoConstraints = false
+        rsSwitch.isOn = true
+        rsSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
+
+        autoSyncButton.addTarget(self, action: #selector(handleAutoSync), for: .touchUpInside)
         previewButton.addTarget(self, action: #selector(handlePreview), for: .touchUpInside)
         renderButton.addTarget(self, action: #selector(handleRenderTap), for: .touchUpInside)
         playButton.addTarget(self, action: #selector(handlePlay), for: .touchUpInside)
@@ -176,21 +217,48 @@ final class StabilizeViewController: UIViewController {
         shareButton.addTarget(self, action: #selector(handleShare), for: .touchUpInside)
     }
 
+    private func configureSlider(_ s: UISlider, min: Float, max: Float, val: Float) {
+        s.translatesAutoresizingMaskIntoConstraints = false
+        s.minimumValue = min
+        s.maximumValue = max
+        s.value = val
+        s.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
+    }
+
+    private func makeSwitchRow(_ label: UILabel, _ toggle: UISwitch) -> UIStackView {
+        let row = UIStackView(arrangedSubviews: [label, toggle])
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.axis = .horizontal
+        row.alignment = .center
+        row.spacing = 8
+        return row
+    }
+
     private func setupLayout() {
         view.addSubview(scrollView)
         scrollView.addSubview(contentView)
 
-        let zoomRow = UIStackView(arrangedSubviews: [zoomLabel, unlimitedZoomSwitch])
-        zoomRow.translatesAutoresizingMaskIntoConstraints = false
-        zoomRow.axis = .horizontal
-        zoomRow.alignment = .center
-        zoomRow.spacing = 8
+        let zoomRow = makeSwitchRow(zoomLabel, unlimitedZoomSwitch)
+        let dynZoomRow = makeSwitchRow(dynamicZoomLabel, dynamicZoomSwitch)
+        let horizonRow = makeSwitchRow(horizonLabel, horizonSwitch)
+        let rsRow = makeSwitchRow(rsLabel, rsSwitch)
 
         let stack = UIStackView(arrangedSubviews: [
-            smoothLabel,
-            smoothSlider,
+            autoSyncButton,
+            autoSyncLabel,
+            pitchLabel,
+            pitchSlider,
+            yawLabel,
+            yawSlider,
+            rollLabel,
+            rollSlider,
             zoomRow,
             zoomSlider,
+            dynZoomRow,
+            horizonRow,
+            tiltLabel,
+            tiltSlider,
+            rsRow,
             offsetLabel,
             offsetSlider,
             previewButton,
@@ -204,7 +272,7 @@ final class StabilizeViewController: UIViewController {
         ])
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.axis = .vertical
-        stack.spacing = 10
+        stack.spacing = 9
         contentView.addSubview(stack)
 
         let guide = view.safeAreaLayoutGuide
@@ -225,6 +293,7 @@ final class StabilizeViewController: UIViewController {
             stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
             stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -28),
 
+            autoSyncButton.heightAnchor.constraint(equalToConstant: 40),
             previewButton.heightAnchor.constraint(equalToConstant: 38),
             renderButton.heightAnchor.constraint(equalToConstant: 46),
             playButton.heightAnchor.constraint(equalToConstant: 42),
@@ -236,15 +305,26 @@ final class StabilizeViewController: UIViewController {
     private func currentConfig() -> StabilizeExportConfig {
         let maxZoom: Double = unlimitedZoomSwitch.isOn ? 0.0 : Double(zoomSlider.value)
         return StabilizeExportConfig(
-            smoothness: Double(smoothSlider.value),
+            pitchSmoothness: Double(pitchSlider.value),
+            yawSmoothness: Double(yawSlider.value),
+            rollSmoothness: Double(rollSlider.value),
             velocityDamping: 1.0,
             timeOffsetMs: Double(offsetSlider.value),
-            maxZoomLimit: maxZoom
+            maxZoomLimit: maxZoom,
+            horizonLockEnabled: horizonSwitch.isOn,
+            horizonLockAmount: 1.0,
+            horizonTiltOffsetDeg: Double(tiltSlider.value),
+            rollingShutterCorrection: rsSwitch.isOn,
+            dynamicZoomEnabled: dynamicZoomSwitch.isOn,
+            axisPresetIndex: detectedAxisPresetIndex
         )
     }
 
     private func updateSliderLabels() {
-        smoothLabel.text = String(format: "Smoothness: %.2f", smoothSlider.value)
+        pitchLabel.text = String(format: "Pitch Smoothness: %.2f", pitchSlider.value)
+        yawLabel.text = String(format: "Yaw Smoothness:   %.2f", yawSlider.value)
+        rollLabel.text = String(format: "Roll Smoothness:  %.2f", rollSlider.value)
+
         if unlimitedZoomSwitch.isOn {
             zoomLabel.text = "Max Zoom: UNLIMITED (0% Border)"
             zoomSlider.isEnabled = false
@@ -254,11 +334,50 @@ final class StabilizeViewController: UIViewController {
             zoomSlider.isEnabled = true
             zoomSlider.alpha = 1.0
         }
+
+        dynamicZoomLabel.text = dynamicZoomSwitch.isOn ? "Dynamic Zoom: ON" : "Dynamic Zoom: STATIC"
+        horizonLabel.text = horizonSwitch.isOn ? "360° Horizon Lock: ON" : "360° Horizon Lock: OFF"
+        tiltLabel.text = String(format: "Horizon Tilt: %+.1f deg", tiltSlider.value)
+        tiltSlider.isEnabled = horizonSwitch.isOn
+        tiltSlider.alpha = horizonSwitch.isOn ? 1.0 : 0.4
+
+        rsLabel.text = rsSwitch.isOn ? "Rolling Shutter Fix: ON" : "Rolling Shutter Fix: OFF"
         offsetLabel.text = String(format: "IMU Sync Offset: %+.1f ms", offsetSlider.value)
     }
 
     @objc private func handleSliderChanged() {
         updateSliderLabels()
+    }
+
+    @objc private func handleAutoSync() {
+        autoSyncButton.isEnabled = false
+        autoSyncButton.alpha = 0.6
+        autoSyncLabel.textColor = UIColor(white: 0.9, alpha: 1.0)
+        autoSyncLabel.text = "Running Optical Flow Auto-Sync & Axis Verification..."
+
+        pipeline.runAutoSync(take: take) { [weak self] result in
+            guard let self = self else { return }
+            self.autoSyncButton.isEnabled = true
+            self.autoSyncButton.alpha = 1.0
+
+            switch result {
+            case .success(let res):
+                if res.valid && res.bestNCC >= 0.35 {
+                    self.detectedAxisPresetIndex = res.bestAxisPresetIndex
+                    self.offsetSlider.value = Float(res.bestOffsetMs)
+                    self.updateSliderLabels()
+                    self.autoSyncLabel.textColor = UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0)
+                    self.autoSyncLabel.text = res.diagnosticMessage
+                    self.handlePreview()
+                } else {
+                    self.autoSyncLabel.textColor = UIColor(red: 1.0, green: 0.78, blue: 0.25, alpha: 1.0)
+                    self.autoSyncLabel.text = res.diagnosticMessage
+                }
+            case .failure(let err):
+                self.autoSyncLabel.textColor = UIColor(red: 1.0, green: 0.45, blue: 0.45, alpha: 1.0)
+                self.autoSyncLabel.text = "Auto-Sync Error: \(err.localizedDescription)"
+            }
+        }
     }
 
     @objc private func handlePreview() {
@@ -292,7 +411,7 @@ final class StabilizeViewController: UIViewController {
         renderButton.setTitle("CANCEL RENDER", for: .normal)
         renderButton.backgroundColor = UIColor(red: 0.85, green: 0.22, blue: 0.22, alpha: 1.0)
         statusLabel.textColor = UIColor(white: 0.90, alpha: 1.0)
-        statusLabel.text = "Initializing Metal Lanczos4 pipeline..."
+        statusLabel.text = "Initializing Metal Lanczos4 + RS pipeline..."
 
         let cfg = currentConfig()
         pipeline.render(

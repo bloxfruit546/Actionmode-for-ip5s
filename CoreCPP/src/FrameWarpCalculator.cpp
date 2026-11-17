@@ -44,7 +44,6 @@ void FrameWarpCalculator::computeInverseHomography(
     const double tx = -cx * invFxZ;
     const double ty = -cy * invFyZ;
 
-    // B = R * K_virt(z)^(-1)
     double B[9];
     B[0] = R[0] * invFxZ;
     B[1] = R[1] * invFyZ;
@@ -58,7 +57,6 @@ void FrameWarpCalculator::computeInverseHomography(
     B[7] = R[7] * invFyZ;
     B[8] = R[6] * tx + R[7] * ty + R[8];
 
-    // H = K_real * B
     outH[0] = static_cast<float>(fx * B[0] + cx * B[6]);
     outH[1] = static_cast<float>(fx * B[1] + cx * B[7]);
     outH[2] = static_cast<float>(fx * B[2] + cx * B[8]);
@@ -85,15 +83,14 @@ double FrameWarpCalculator::computeRequiredZoom(
     const double maxU = static_cast<double>(width - 1);
     const double maxV = static_cast<double>(height - 1);
 
-    // 16 boundary points along the 4 edges
     std::array<std::pair<double, double>, 16> boundaryPts{};
     int idx = 0;
     for (int k = 0; k < 4; ++k) {
         const double t = static_cast<double>(k) / 4.0;
-        boundaryPts[idx++] = {t * maxU, 0.0};                 // Top edge
-        boundaryPts[idx++] = {maxU, t * maxV};                // Right edge
-        boundaryPts[idx++] = {(1.0 - t) * maxU, maxV};        // Bottom edge
-        boundaryPts[idx++] = {0.0, (1.0 - t) * maxV};         // Left edge
+        boundaryPts[idx++] = {t * maxU, 0.0};
+        boundaryPts[idx++] = {maxU, t * maxV};
+        boundaryPts[idx++] = {(1.0 - t) * maxU, maxV};
+        boundaryPts[idx++] = {0.0, (1.0 - t) * maxV};
     }
 
     const double minValidX = borderMarginPx;
@@ -148,45 +145,127 @@ WarpComputationResult FrameWarpCalculator::computeAllFrames(
     double nominalFps,
     double maxZoomLimit
 ) {
+    TrajectoryEngine dummyEngine;
+    TrajectoryResult traj;
+    traj.rawFrameQuats = rawQuats;
+    traj.smoothFrameQuats = smoothQuats;
+    traj.frameTimestampsSec.resize(rawQuats.size(), 0.0);
+    traj.valid = !rawQuats.empty();
+    return computeAllFramesWithRollingShutter(
+        dummyEngine,
+        traj,
+        profile,
+        nominalFps,
+        maxZoomLimit,
+        false,
+        true
+    );
+}
+
+WarpComputationResult FrameWarpCalculator::computeAllFramesWithRollingShutter(
+    const TrajectoryEngine& engine,
+    const TrajectoryResult& traj,
+    const CalibrationProfile& profile,
+    double nominalFps,
+    double maxZoomLimit,
+    bool rollingShutterCorrection,
+    bool dynamicZoomEnabled
+) {
     WarpComputationResult res;
-    const size_t n = std::min(rawQuats.size(), smoothQuats.size());
+    const size_t n = std::min(traj.rawFrameQuats.size(), traj.smoothFrameQuats.size());
     if (n == 0) {
         return res;
     }
 
-    std::vector<Quat> qCorrs(n);
+    const double dt = (nominalFps > 1.0) ? (1.0 / nominalFps) : (1.0 / 30.0);
+
+    // Step 1: Smooth Iterative Trajectory Pull-back if maxZoomLimit > 1.0
+    // Prevents hard-clamp jerk while respecting maxZoomLimit.
+    std::vector<Quat> adjustedSmooth = traj.smoothFrameQuats;
+    if (maxZoomLimit > 1.0) {
+        std::vector<double> pullFactor(n, 1.0);
+        for (size_t i = 0; i < n; ++i) {
+            const Quat qCorrFull = (traj.rawFrameQuats[i].conjugate() * traj.smoothFrameQuats[i]).normalized();
+            const double zReq = computeRequiredZoom(
+                qCorrFull, profile.width, profile.height,
+                profile.fx, profile.fy, profile.cx, profile.cy, 4.0
+            );
+            if (zReq > maxZoomLimit) {
+                double lo = 0.0;
+                double hi = 1.0;
+                for (int iter = 0; iter < 12; ++iter) {
+                    const double mid = 0.5 * (lo + hi);
+                    const Quat qTest = Quat::slerp(traj.rawFrameQuats[i], traj.smoothFrameQuats[i], mid);
+                    const Quat qCorrTest = (traj.rawFrameQuats[i].conjugate() * qTest).normalized();
+                    const double zTest = computeRequiredZoom(
+                        qCorrTest, profile.width, profile.height,
+                        profile.fx, profile.fy, profile.cx, profile.cy, 4.0
+                    );
+                    if (zTest <= maxZoomLimit) {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                pullFactor[i] = lo;
+            }
+        }
+
+        // Smooth pullFactor (two-pass min-envelope IIR) so pull-back never causes derivative discontinuities
+        const double alphaPull = std::exp(-dt / 0.35);
+        for (size_t i = 1; i < n; ++i) {
+            pullFactor[i] = std::min(pullFactor[i], alphaPull * pullFactor[i - 1] + (1.0 - alphaPull) * pullFactor[i]);
+        }
+        for (size_t i = n - 1; i > 0; --i) {
+            const size_t idx = i - 1;
+            pullFactor[idx] = std::min(pullFactor[idx], alphaPull * pullFactor[idx + 1] + (1.0 - alphaPull) * pullFactor[idx]);
+        }
+
+        for (size_t i = 0; i < n; ++i) {
+            if (pullFactor[i] < 0.9999) {
+                adjustedSmooth[i] = Quat::slerp(traj.rawFrameQuats[i], traj.smoothFrameQuats[i], pullFactor[i]);
+            }
+        }
+    }
+
+    // Step 2: Compute minimum safe zoom per frame
     std::vector<double> zMin(n, 1.0);
     for (size_t i = 0; i < n; ++i) {
-        qCorrs[i] = (rawQuats[i].conjugate() * smoothQuats[i]).normalized();
+        const Quat qCorr = (traj.rawFrameQuats[i].conjugate() * adjustedSmooth[i]).normalized();
         zMin[i] = computeRequiredZoom(
-            qCorrs[i],
-            profile.width,
-            profile.height,
-            profile.fx,
-            profile.fy,
-            profile.cx,
-            profile.cy,
-            4.0
+            qCorr, profile.width, profile.height,
+            profile.fx, profile.fy, profile.cx, profile.cy, 4.0
         );
     }
 
-    // Smooth upper-envelope zoom curve (zero-phase two-pass IIR, clamped >= zMin[i])
-    const double dt = (nominalFps > 1.0) ? (1.0 / nominalFps) : (1.0 / 30.0);
-    const double alphaZoom = std::exp(-dt / 0.5);
-    std::vector<double> zFwd = zMin;
-    for (size_t i = 1; i < n; ++i) {
-        zFwd[i] = std::max(zMin[i], alphaZoom * zFwd[i - 1] + (1.0 - alphaZoom) * zMin[i]);
-    }
-    std::vector<double> zSmooth = zFwd;
-    for (size_t i = n - 1; i > 0; --i) {
-        const size_t idx = i - 1;
-        zSmooth[idx] = std::max(zMin[idx], alphaZoom * zSmooth[idx + 1] + (1.0 - alphaZoom) * zFwd[idx]);
+    // Step 3: Smooth upper-envelope zoom curve (zero-phase two-pass IIR, clamped >= zMin[i])
+    std::vector<double> zSmooth = zMin;
+    if (dynamicZoomEnabled) {
+        const double alphaZoom = std::exp(-dt / 0.5);
+        std::vector<double> zFwd = zMin;
+        for (size_t i = 1; i < n; ++i) {
+            zFwd[i] = std::max(zMin[i], alphaZoom * zFwd[i - 1] + (1.0 - alphaZoom) * zMin[i]);
+        }
+        zSmooth = zFwd;
+        for (size_t i = n - 1; i > 0; --i) {
+            const size_t idx = i - 1;
+            zSmooth[idx] = std::max(zMin[idx], alphaZoom * zSmooth[idx + 1] + (1.0 - alphaZoom) * zFwd[idx]);
+        }
+    } else {
+        double staticMax = 1.0;
+        for (double z : zMin) {
+            staticMax = std::max(staticMax, z);
+        }
+        std::fill(zSmooth.begin(), zSmooth.end(), staticMax);
     }
 
     res.packets.resize(n);
+    res.frameLUTs.resize(n);
     res.minZoom = 1e9;
     res.maxZoom = 0.0;
     double sumZoom = 0.0;
+
+    const bool useRS = rollingShutterCorrection && (profile.readoutTimeSec > 1e-5) && (traj.frameTimestampsSec.size() == n);
 
     for (size_t i = 0; i < n; ++i) {
         double zFinal = zSmooth[i];
@@ -194,18 +273,30 @@ WarpComputationResult FrameWarpCalculator::computeAllFrames(
             zFinal = std::min(zFinal, maxZoomLimit);
         }
 
+        const Quat qCorrMid = (traj.rawFrameQuats[i].conjugate() * adjustedSmooth[i]).normalized();
         GFWarpMatrixPacket pkt{};
         computeInverseHomography(
-            qCorrs[i],
-            profile.fx,
-            profile.fy,
-            profile.cx,
-            profile.cy,
-            zFinal,
-            pkt.m
+            qCorrMid, profile.fx, profile.fy, profile.cx, profile.cy, zFinal, pkt.m
         );
         pkt.zoomUsed = static_cast<float>(zFinal);
         res.packets[i] = pkt;
+
+        GFWarpFrameLUT lut{};
+        lut.zoomUsed = static_cast<float>(zFinal);
+        for (int s = 0; s < kRollingShutterSlices; ++s) {
+            if (useRS) {
+                const double frac = (static_cast<double>(s) / static_cast<double>(kRollingShutterSlices - 1)) - 0.5;
+                const double tRow = traj.frameTimestampsSec[i] + frac * profile.readoutTimeSec;
+                const Quat qRawRow = engine.sampleRawQuaternionAt(tRow);
+                const Quat qCorrRow = (qRawRow.conjugate() * adjustedSmooth[i]).normalized();
+                computeInverseHomography(
+                    qCorrRow, profile.fx, profile.fy, profile.cx, profile.cy, zFinal, lut.sliceH[s]
+                );
+            } else {
+                std::copy(std::begin(pkt.m), std::end(pkt.m), std::begin(lut.sliceH[s]));
+            }
+        }
+        res.frameLUTs[i] = lut;
 
         res.minZoom = std::min(res.minZoom, zFinal);
         res.maxZoom = std::max(res.maxZoom, zFinal);

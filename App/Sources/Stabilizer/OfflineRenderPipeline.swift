@@ -4,10 +4,18 @@ import Foundation
 import Photos
 
 struct StabilizeExportConfig {
-    let smoothness: Double
+    let pitchSmoothness: Double
+    let yawSmoothness: Double
+    let rollSmoothness: Double
     let velocityDamping: Double
     let timeOffsetMs: Double
     let maxZoomLimit: Double // <= 1.0 means unlimited safe zoom
+    let horizonLockEnabled: Bool
+    let horizonLockAmount: Double
+    let horizonTiltOffsetDeg: Double
+    let rollingShutterCorrection: Bool
+    let dynamicZoomEnabled: Bool
+    let axisPresetIndex: Int
 }
 
 struct StabilizeExportResult {
@@ -49,14 +57,77 @@ final class OfflineRenderPipeline {
         return dir
     }
 
+    func runAutoSync(
+        take: CaptureTake,
+        completion: @escaping (Result<GFOpticalSyncResultObjC, Error>) -> Void
+    ) {
+        setupQueue.async { [weak self] in
+            guard let self = self else { return }
+            let startTime = CFAbsoluteTimeGetCurrent()
+            let asset = AVURLAsset(url: take.movURL)
+            guard let videoTrack = asset.tracks(withMediaType: .video).first else {
+                DispatchQueue.main.async {
+                    completion(.failure(self.makeError("No video track found for Auto-Sync.")))
+                }
+                return
+            }
+
+            do {
+                let reader = try AVAssetReader(asset: asset)
+                let outputSettings: [String: Any] = [
+                    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+                ]
+                let trackOut = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: outputSettings)
+                trackOut.alwaysCopiesSampleData = false
+                guard reader.canAdd(trackOut) else {
+                    throw self.makeError("AVAssetReader cannot add video output for Auto-Sync.")
+                }
+                reader.add(trackOut)
+                guard reader.startReading() else {
+                    throw self.makeError("AVAssetReader failed to start for Auto-Sync.")
+                }
+
+                let collector = GFOpticalSyncCollectorBridge()
+                collector.reset()
+                var count = 0
+                let maxSampleFrames = 110
+
+                while count < maxSampleFrames {
+                    var reachedEnd = false
+                    autoreleasepool {
+                        guard let sample = trackOut.copyNextSampleBuffer() else {
+                            reachedEnd = true
+                            return
+                        }
+                        if let pb = CMSampleBufferGetImageBuffer(sample) {
+                            let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+                            collector.addLumaPixelBuffer(pb, timestampSec: pts)
+                            count += 1
+                        }
+                    }
+                    if reachedEnd {
+                        break
+                    }
+                }
+                reader.cancelReading()
+
+                let result = collector.solve(withSidecarPath: take.sidecarURL.path)
+                let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+                FileLogger.shared.log(String(format: "Auto-Sync completed in %.2fs (%d frames): %@", elapsed, count, result.diagnosticMessage))
+
+                DispatchQueue.main.async {
+                    completion(.success(result))
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
     func computePlanPreview(take: CaptureTake, config: StabilizeExportConfig) -> GFStabilizerPlanObjC? {
-        let bridge = GFStabilizerBridge(
-            sidecarPath: take.sidecarURL.path,
-            smoothness: config.smoothness,
-            velocityDamping: config.velocityDamping,
-            timeOffsetMs: config.timeOffsetMs,
-            maxZoomLimit: config.maxZoomLimit
-        )
+        let bridge = makeBridge(sidecarPath: take.sidecarURL.path, config: config)
         return bridge?.plan
     }
 
@@ -71,13 +142,7 @@ final class OfflineRenderPipeline {
             guard let self = self else { return }
             let startTime = CFAbsoluteTimeGetCurrent()
 
-            guard let bridge = GFStabilizerBridge(
-                sidecarPath: take.sidecarURL.path,
-                smoothness: config.smoothness,
-                velocityDamping: config.velocityDamping,
-                timeOffsetMs: config.timeOffsetMs,
-                maxZoomLimit: config.maxZoomLimit
-            ) else {
+            guard let bridge = self.makeBridge(sidecarPath: take.sidecarURL.path, config: config) else {
                 DispatchQueue.main.async {
                     completion(.failure(self.makeError("Failed to initialize GFStabilizerBridge.")))
                 }
@@ -184,7 +249,7 @@ final class OfflineRenderPipeline {
                 }
                 writer.startSession(atSourceTime: .zero)
 
-                FileLogger.shared.log("OfflineRender STARTED: \(take.uuid) (\(width)x\(height), ~\(totalFrames) frames, audio=\(audioWriterIn != nil))")
+                FileLogger.shared.log("OfflineRender STARTED: \(take.uuid) (\(width)x\(height), ~\(totalFrames) frames, RS=\(config.rollingShutterCorrection), HL=\(config.horizonLockEnabled))")
 
                 let videoRenderQueue = DispatchQueue(label: "com.gyrostab5s.render.video", qos: .userInitiated)
                 let audioRenderQueue = DispatchQueue(label: "com.gyrostab5s.render.audio", qos: .userInitiated)
@@ -451,6 +516,24 @@ final class OfflineRenderPipeline {
                 }
             }
         }
+    }
+
+    private func makeBridge(sidecarPath: String, config: StabilizeExportConfig) -> GFStabilizerBridge? {
+        return GFStabilizerBridge(
+            sidecarPath: sidecarPath,
+            pitchSmoothness: config.pitchSmoothness,
+            yawSmoothness: config.yawSmoothness,
+            rollSmoothness: config.rollSmoothness,
+            velocityDamping: config.velocityDamping,
+            timeOffsetMs: config.timeOffsetMs,
+            maxZoomLimit: config.maxZoomLimit,
+            horizonLockEnabled: config.horizonLockEnabled,
+            horizonLockAmount: config.horizonLockAmount,
+            horizonTiltOffsetDeg: config.horizonTiltOffsetDeg,
+            rollingShutterCorrection: config.rollingShutterCorrection,
+            dynamicZoomEnabled: config.dynamicZoomEnabled,
+            axisPresetIndex: config.axisPresetIndex
+        )
     }
 
     private func makeError(_ message: String) -> NSError {
