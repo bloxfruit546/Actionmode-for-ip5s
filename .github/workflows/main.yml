@@ -1,0 +1,75 @@
+name: Build iOS 12 (A7 arm64) & CoreCPP Tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  core-cpp-tests:
+    name: CoreCPP C++17 Unit Tests (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure CMake
+        run: cmake -S . -B build
+
+      - name: Build CoreCPP
+        run: cmake --build build
+
+      - name: Run CTest
+        run: ctest --test-dir build --output-on-failure
+
+  build-ios12:
+    name: Build iOS 12.0 arm64 (.ipa & .deb)
+    runs-on: macos-latest
+    needs: core-cpp-tests
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen, ldid, and dpkg
+        run: brew install xcodegen ldid dpkg
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build arm64 Release app (unsigned)
+        run: |
+          xcodebuild \
+            -project GyroStabilizer5s.xcodeproj \
+            -scheme GyroStabilizer5s \
+            -configuration Release \
+            -sdk iphoneos \
+            -arch arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            SYMROOT="$PWD/build" \
+            build
+
+      - name: Fake-sign with ldid & package IPA + DEB
+        run: |
+          APP_PATH="build/Release-iphoneos/GyroStabilizer5s.app"
+          ldid -Sentitlements.plist "$APP_PATH/GyroStabilizer5s"
+
+          mkdir -p dist/Payload
+          cp -R "$APP_PATH" dist/Payload/
+          (cd dist && zip -qr GyroStabilizer5s-ios12-arm64.ipa Payload)
+
+          mkdir -p deb_pkg/DEBIAN deb_pkg/Applications
+          cp packaging/DEBIAN/control deb_pkg/DEBIAN/control
+          cp -R "$APP_PATH" deb_pkg/Applications/
+          dpkg-deb -Zgzip -b deb_pkg dist/GyroStabilizer5s-0.1.0-iphoneos-arm.deb
+
+      - name: Upload IPA & DEB artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: GyroStabilizer5s-iOS12-arm64
+          path: |
+            dist/GyroStabilizer5s-ios12-arm64.ipa
+            dist/GyroStabilizer5s-0.1.0-iphoneos-arm.deb
