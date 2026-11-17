@@ -109,13 +109,43 @@ final class ProCameraEngine: NSObject {
     private var telemetryTimer: DispatchSourceTimer?
     private var isEISOff = true
 
+    // Circular 500ms IMU pre-roll buffer + live sidecar sink
+    private struct BufferedGyroSample {
+        let timestamp: Double
+        let gx: Double
+        let gy: Double
+        let gz: Double
+    }
+    private struct BufferedAccelSample {
+        let timestamp: Double
+        let ax: Float
+        let ay: Float
+        let az: Float
+    }
+    private let imuBufferLock = NSLock()
+    private var gyroRingBuffer: [BufferedGyroSample] = []
+    private var accelRingBuffer: [BufferedAccelSample] = []
+    private var activeSidecarWriter: GFSidecarWriterBridge?
+    private var isImuRunning = false
+
     func startSession() {
         sessionQueue.async { [weak self] in
             self?.configureSessionIfNeeded()
             if self?.session.isRunning == false {
                 self?.session.startRunning()
             }
+            self?.startBackgroundImuStream()
             self?.startTelemetryTimer()
+        }
+    }
+
+    func stopSession() {
+        sessionQueue.async { [weak self] in
+            self?.stopTelemetryTimer()
+            self?.stopBackgroundImuStream()
+            if self?.session.isRunning == true {
+                self?.session.stopRunning()
+            }
         }
     }
 
@@ -329,8 +359,18 @@ final class ProCameraEngine: NSObject {
                     self.activeReadoutSec = Float(readoutSec)
                 }
 
-                // Start Raw IMU BEFORE video frames begin appending (no DeviceMotion!)
-                self.startRawImuCapture(sidecarWriter: scWriter)
+                // Flush 500ms IMU pre-roll buffer and attach live IMU sink BEFORE enabling recording
+                self.imuBufferLock.lock()
+                for g in self.gyroRingBuffer {
+                    _ = scWriter.writeGyroTimestamp(g.timestamp, gx: g.gx, gy: g.gy, gz: g.gz)
+                    self.recordedGyroCount += 1
+                }
+                for a in self.accelRingBuffer {
+                    _ = scWriter.writeAccelTimestamp(a.timestamp, ax: a.ax, ay: a.ay, az: a.az)
+                }
+                self.activeSidecarWriter = scWriter
+                self.imuBufferLock.unlock()
+
                 self.isRecording = true
                 FileLogger.shared.log("Recording STARTED: \(paths.uuid) [\(mode.displayName) @ \(self.currentBitrate.label)]")
             } catch {
@@ -345,7 +385,12 @@ final class ProCameraEngine: NSObject {
             guard let self = self, self.isRecording else { return }
             self.isRecording = false
 
-            self.stopRawImuCapture()
+            // Post-roll 120ms so final IMU timestamps always cover lastFramePts + 0.12s
+            Thread.sleep(forTimeInterval: 0.12)
+
+            self.imuBufferLock.lock()
+            self.activeSidecarWriter = nil
+            self.imuBufferLock.unlock()
 
             self.writerQueue.async {
                 guard let writer = self.assetWriter,
@@ -511,50 +556,124 @@ final class ProCameraEngine: NSObject {
         }
     }
 
-    // MARK: - Raw IMU Capture (120Hz request -> ~90Hz hardware, NO DeviceMotion)
-    private func startRawImuCapture(sidecarWriter: GFSidecarWriterBridge) {
+    // MARK: - Background Raw IMU Stream (500ms Pre-roll Ring Buffer, NO DeviceMotion)
+    private func startBackgroundImuStream() {
+        guard !isImuRunning else { return }
+        isImuRunning = true
+
         motionManager.gyroUpdateInterval = 1.0 / 120.0
         motionManager.accelerometerUpdateInterval = 1.0 / 120.0
 
         if motionManager.isGyroAvailable {
             motionManager.startGyroUpdates(to: motionOpQueue) { [weak self] data, error in
-                guard let data = data, error == nil else { return }
-                _ = sidecarWriter.writeGyroTimestamp(
-                    data.timestamp,
+                guard let self = self, let data = data, error == nil else { return }
+                let ts = data.timestamp
+                let sample = BufferedGyroSample(
+                    timestamp: ts,
                     gx: data.rotationRate.x,
                     gy: data.rotationRate.y,
                     gz: data.rotationRate.z
                 )
-                self?.recordedGyroCount += 1
+
+                self.imuBufferLock.lock()
+                self.gyroRingBuffer.append(sample)
+                let cutoff = ts - 0.55
+                while let first = self.gyroRingBuffer.first, first.timestamp < cutoff {
+                    self.gyroRingBuffer.removeFirst()
+                }
+                if let writer = self.activeSidecarWriter {
+                    _ = writer.writeGyroTimestamp(ts, gx: sample.gx, gy: sample.gy, gz: sample.gz)
+                    self.recordedGyroCount += 1
+                }
+                self.imuBufferLock.unlock()
             }
         }
 
         if motionManager.isAccelerometerAvailable {
-            motionManager.startAccelerometerUpdates(to: motionOpQueue) { data, error in
-                guard let data = data, error == nil else { return }
-                _ = sidecarWriter.writeAccelTimestamp(
-                    data.timestamp,
+            motionManager.startAccelerometerUpdates(to: motionOpQueue) { [weak self] data, error in
+                guard let self = self, let data = data, error == nil else { return }
+                let ts = data.timestamp
+                let sample = BufferedAccelSample(
+                    timestamp: ts,
                     ax: Float(data.acceleration.x),
                     ay: Float(data.acceleration.y),
                     az: Float(data.acceleration.z)
                 )
+
+                self.imuBufferLock.lock()
+                self.accelRingBuffer.append(sample)
+                let cutoff = ts - 0.55
+                while let first = self.accelRingBuffer.first, first.timestamp < cutoff {
+                    self.accelRingBuffer.removeFirst()
+                }
+                if let writer = self.activeSidecarWriter {
+                    _ = writer.writeAccelTimestamp(ts, ax: sample.ax, ay: sample.ay, az: sample.az)
+                }
+                self.imuBufferLock.unlock()
             }
         }
     }
 
-    private func stopRawImuCapture() {
+    private func stopBackgroundImuStream() {
+        guard isImuRunning else { return }
+        isImuRunning = false
         motionManager.stopGyroUpdates()
         motionManager.stopAccelerometerUpdates()
         motionOpQueue.waitUntilAllOperationsAreFinished()
+        imuBufferLock.lock()
+        gyroRingBuffer.removeAll()
+        accelRingBuffer.removeAll()
+        imuBufferLock.unlock()
     }
 
-    // MARK: - Telemetry Timer
+    // MARK: - Active Auto-ISO Shutter Cap + Telemetry Timer
+    private func enforceAntiBlurShutterIfNeeded() {
+        guard isAntiBlurCapEnabled, !isExposureLocked, let dev = videoDevice else { return }
+        guard dev.isExposureModeSupported(.custom) else { return }
+
+        let capTimescale: Int32 = (currentMode == .cinema1080p30) ? 120 : 240
+        let maxAllowedSec = 1.0 / Double(capTimescale)
+        let currentExpSec = CMTimeGetSeconds(dev.exposureDuration)
+
+        // If iOS auto-exposure lengthened shutter beyond cap, or we are actively managing custom exposure:
+        if currentExpSec > maxAllowedSec * 1.05 || dev.exposureMode == .custom {
+            let offset = Double(dev.exposureTargetOffset)
+            // If bright enough at minISO and clamped shutter, return to continuousAutoExposure for faster shutters
+            if dev.exposureMode == .custom && dev.iso <= dev.activeFormat.minISO * 1.05 && offset > 0.35 {
+                if dev.isExposureModeSupported(.continuousAutoExposure) {
+                    do {
+                        try dev.lockForConfiguration()
+                        dev.exposureMode = .continuousAutoExposure
+                        dev.activeMaxExposureDuration = CMTime(value: 1, timescale: capTimescale)
+                        dev.unlockForConfiguration()
+                    } catch {}
+                }
+                return
+            }
+
+            let gainFactor = Float(pow(2.0, -offset * 0.5))
+            let rawTargetISO = dev.iso * gainFactor
+            let clampedISO = min(dev.activeFormat.maxISO, max(dev.activeFormat.minISO, rawTargetISO))
+
+            do {
+                try dev.lockForConfiguration()
+                dev.setExposureModeCustom(
+                    duration: CMTime(value: 1, timescale: capTimescale),
+                    iso: clampedISO,
+                    completionHandler: nil
+                )
+                dev.unlockForConfiguration()
+            } catch {}
+        }
+    }
+
     private func startTelemetryTimer() {
         stopTelemetryTimer()
         let timer = DispatchSource.makeTimerSource(queue: sessionQueue)
         timer.schedule(deadline: .now() + 0.2, repeating: 0.25)
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
+            self.enforceAntiBlurShutterIfNeeded()
             let iso = self.videoDevice?.iso ?? 0
             let expMs = self.videoDevice.map { CMTimeGetSeconds($0.exposureDuration) * 1000.0 } ?? 0.0
             let lens = self.videoDevice?.lensPosition ?? 0

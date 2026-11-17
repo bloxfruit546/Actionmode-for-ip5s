@@ -17,6 +17,17 @@ final class TakeDetailViewController: UIViewController {
         return tv
     }()
 
+    private let stabilizeButton: UIButton = {
+        let btn = UIButton(type: .system)
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        btn.setTitle("STABILIZE THIS TAKE", for: .normal)
+        btn.setTitleColor(.white, for: .normal)
+        btn.titleLabel?.font = UIFont.systemFont(ofSize: 15, weight: .heavy)
+        btn.backgroundColor = UIColor(red: 0.85, green: 0.38, blue: 0.12, alpha: 1.0)
+        btn.layer.cornerRadius = 8
+        return btn
+    }()
+
     private let playButton: UIButton = {
         let btn = UIButton(type: .system)
         btn.translatesAutoresizingMaskIntoConstraints = false
@@ -56,12 +67,14 @@ final class TakeDetailViewController: UIViewController {
         setupLayout()
         inspectSidecar()
 
+        stabilizeButton.addTarget(self, action: #selector(handleStabilize), for: .touchUpInside)
         playButton.addTarget(self, action: #selector(handlePlay), for: .touchUpInside)
         shareButton.addTarget(self, action: #selector(handleShare), for: .touchUpInside)
     }
 
     private func setupLayout() {
         view.addSubview(summaryTextView)
+        view.addSubview(stabilizeButton)
         view.addSubview(playButton)
         view.addSubview(shareButton)
 
@@ -70,16 +83,21 @@ final class TakeDetailViewController: UIViewController {
             summaryTextView.topAnchor.constraint(equalTo: guide.topAnchor, constant: 12),
             summaryTextView.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
             summaryTextView.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
-            summaryTextView.bottomAnchor.constraint(equalTo: playButton.topAnchor, constant: -14),
+            summaryTextView.bottomAnchor.constraint(equalTo: stabilizeButton.topAnchor, constant: -14),
+
+            stabilizeButton.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
+            stabilizeButton.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
+            stabilizeButton.heightAnchor.constraint(equalToConstant: 48),
+            stabilizeButton.bottomAnchor.constraint(equalTo: playButton.topAnchor, constant: -10),
 
             playButton.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
             playButton.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
-            playButton.heightAnchor.constraint(equalToConstant: 46),
+            playButton.heightAnchor.constraint(equalToConstant: 44),
             playButton.bottomAnchor.constraint(equalTo: shareButton.topAnchor, constant: -10),
 
             shareButton.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 12),
             shareButton.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -12),
-            shareButton.heightAnchor.constraint(equalToConstant: 46),
+            shareButton.heightAnchor.constraint(equalToConstant: 44),
             shareButton.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -12)
         ])
     }
@@ -125,6 +143,11 @@ final class TakeDetailViewController: UIViewController {
         s.minExposureMs, s.maxExposureMs,
         s.syncCoverageOk ? "PASS" : "WARN",
         s.errorMessage.isEmpty ? "None" : s.errorMessage)
+    }
+
+    @objc private func handleStabilize() {
+        let vc = StabilizeViewController(take: take)
+        navigationController?.pushViewController(vc, animated: true)
     }
 
     @objc private func handlePlay() {
