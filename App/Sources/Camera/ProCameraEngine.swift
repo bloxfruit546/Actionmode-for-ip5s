@@ -555,7 +555,7 @@ final class ProCameraEngine: NSObject {
         timer.schedule(deadline: .now() + 0.2, repeating: 0.25)
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
-            let iso = self.videoDevice?.ISO ?? 0
+            let iso = self.videoDevice?.iso ?? 0
             let expMs = self.videoDevice.map { CMTimeGetSeconds($0.exposureDuration) * 1000.0 } ?? 0.0
             let lens = self.videoDevice?.lensPosition ?? 0
             let eis = self.isEISOff
