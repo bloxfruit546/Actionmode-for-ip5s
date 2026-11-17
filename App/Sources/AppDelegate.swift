@@ -10,13 +10,8 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     ) -> Bool {
         UIApplication.shared.isIdleTimerDisabled = true
 
-        let nav = UINavigationController(rootViewController: ProbeViewController())
-        nav.navigationBar.barStyle = .black
-        nav.navigationBar.isTranslucent = false
-        nav.navigationBar.tintColor = .white
-
         let win = UIWindow(frame: UIScreen.main.bounds)
-        win.rootViewController = nav
+        win.rootViewController = MainTabBarController()
         win.makeKeyAndVisible()
         self.window = win
         return true
