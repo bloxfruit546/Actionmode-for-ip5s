@@ -127,8 +127,16 @@ final class OfflineRenderPipeline {
     }
 
     func computePlanPreview(take: CaptureTake, config: StabilizeExportConfig) -> GFStabilizerPlanObjC? {
-        let bridge = makeBridge(sidecarPath: take.sidecarURL.path, config: config)
+        let asset = AVURLAsset(url: take.movURL)
+        let rotDeg = asset.tracks(withMediaType: .video).first.map { Self.videoRotationDegrees(from: $0.preferredTransform) } ?? 0
+        let bridge = makeBridge(sidecarPath: take.sidecarURL.path, config: config, videoRotationDegrees: rotDeg)
         return bridge?.plan
+    }
+
+    static func videoRotationDegrees(from transform: CGAffineTransform) -> Int {
+        let angle = atan2(transform.b, transform.a)
+        let deg = Int(round(angle * 180.0 / .pi))
+        return ((deg % 360) + 360) % 360
     }
 
     func render(
@@ -142,7 +150,16 @@ final class OfflineRenderPipeline {
             guard let self = self else { return }
             let startTime = CFAbsoluteTimeGetCurrent()
 
-            guard let bridge = self.makeBridge(sidecarPath: take.sidecarURL.path, config: config) else {
+            let asset = AVURLAsset(url: take.movURL)
+            guard let videoTrack = asset.tracks(withMediaType: .video).first else {
+                DispatchQueue.main.async {
+                    completion(.failure(self.makeError("No video track found in .mov.")))
+                }
+                return
+            }
+            let rotDeg = Self.videoRotationDegrees(from: videoTrack.preferredTransform)
+
+            guard let bridge = self.makeBridge(sidecarPath: take.sidecarURL.path, config: config, videoRotationDegrees: rotDeg) else {
                 DispatchQueue.main.async {
                     completion(.failure(self.makeError("Failed to initialize GFStabilizerBridge.")))
                 }
@@ -159,14 +176,6 @@ final class OfflineRenderPipeline {
 
             let outURL = Self.stabilizedDirectory.appendingPathComponent("\(take.uuid)_stab.mov")
             try? FileManager.default.removeItem(at: outURL)
-
-            let asset = AVURLAsset(url: take.movURL)
-            guard let videoTrack = asset.tracks(withMediaType: .video).first else {
-                DispatchQueue.main.async {
-                    completion(.failure(self.makeError("No video track found in .mov.")))
-                }
-                return
-            }
 
             let width = Int(plan.width > 0 ? plan.width : UInt32(videoTrack.naturalSize.width))
             let height = Int(plan.height > 0 ? plan.height : UInt32(videoTrack.naturalSize.height))
@@ -518,7 +527,7 @@ final class OfflineRenderPipeline {
         }
     }
 
-    private func makeBridge(sidecarPath: String, config: StabilizeExportConfig) -> GFStabilizerBridge? {
+    private func makeBridge(sidecarPath: String, config: StabilizeExportConfig, videoRotationDegrees: Int) -> GFStabilizerBridge? {
         return GFStabilizerBridge(
             sidecarPath: sidecarPath,
             pitchSmoothness: config.pitchSmoothness,
@@ -532,7 +541,8 @@ final class OfflineRenderPipeline {
             horizonTiltOffsetDeg: config.horizonTiltOffsetDeg,
             rollingShutterCorrection: config.rollingShutterCorrection,
             dynamicZoomEnabled: config.dynamicZoomEnabled,
-            axisPresetIndex: config.axisPresetIndex
+            axisPresetIndex: config.axisPresetIndex,
+            videoRotationDegrees: videoRotationDegrees
         )
     }
 

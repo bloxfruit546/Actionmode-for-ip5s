@@ -21,6 +21,7 @@ struct StabilizerConfig {
     double horizonTiltOffsetDeg = 0.0;
     bool rollingShutterCorrection = true;
     bool dynamicZoomEnabled = true;
+    int videoRotationDegrees = 0;    // 0, 90, 180, 270 from AVAssetTrack.preferredTransform
     double axisMatrix[9] = {0, -1, 0, -1, 0, 0, 0, 0, -1};
     bool hasCustomAxisMatrix = false;
 };
@@ -32,6 +33,9 @@ struct TrajectoryResult {
     double stabilityImprovementPct = 0.0;
     double rawAngularAccelRms = 0.0;
     double smoothAngularAccelRms = 0.0;
+    double maxInputRollDeg = 0.0;
+    double maxOutputRollErrorDeg = 0.0;
+    double maxCorrectionDeg = 0.0;
     bool valid = false;
 };
 

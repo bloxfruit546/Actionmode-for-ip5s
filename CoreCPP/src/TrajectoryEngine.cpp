@@ -1,3 +1,9 @@
+/**
+ * Unified World <-> Camera <-> Pixel Convention:
+ *   - q_raw(t) = q_WC(t): Camera-to-World orientation (P_world = R_WC * P_cam).
+ *   - P_cam(t) = R_CW(t) * P_world, where R_CW(t) = R_WC(t)^T = q_raw(t).conjugate().
+ *   - Inverse Homography in FrameWarpCalculator: H_i(r) = K_real * R_CW(t_r) * R_CW_smooth(i)^T * K_virt^(-1).
+ */
 #include "TrajectoryEngine.hpp"
 
 #include <algorithm>
@@ -46,7 +52,7 @@ Quat quatExp(const Vec3& r) {
 }
 
 Quat quatFromBasis(const Vec3& right, const Vec3& down, const Vec3& forward) {
-    // Columns of R_world_from_cam: [right, down, forward]
+    // Columns of R_WC: [right, down, forward]
     const double m00 = right.x, m01 = down.x, m02 = forward.x;
     const double m10 = right.y, m11 = down.y, m12 = forward.y;
     const double m20 = right.z, m21 = down.z, m22 = forward.z;
@@ -118,6 +124,28 @@ double computeAlphaForAxis(double smoothness, double smoothOmega, double velocit
     return std::exp(-dtF / std::max(tauEff, 1e-4));
 }
 
+double computeRollErrorDeg(const Quat& qWC, const Vec3& gWorld, int videoRotationDegrees) {
+    const double rotRad = static_cast<double>(videoRotationDegrees) * (kPi / 180.0);
+    const Quat rotQ = Quat::fromAxisAngle(Vec3(0.0, 0.0, 1.0), -rotRad);
+    const Vec3 screenRightCam = rotQ.rotateVector(Vec3(1.0, 0.0, 0.0));
+    const Vec3 screenDownCam = rotQ.rotateVector(Vec3(0.0, 1.0, 0.0));
+
+    const Vec3 rightW = qWC.rotateVector(screenRightCam).normalized();
+    const Vec3 downW = qWC.rotateVector(screenDownCam).normalized();
+    const Vec3 forwardW = qWC.rotateVector(Vec3(0.0, 0.0, 1.0)).normalized();
+
+    // Project gravity onto image plane perpendicular to forwardW
+    Vec3 gProj = gWorld - forwardW * gWorld.dot(forwardW);
+    if (gProj.normSquared() < 1e-6) {
+        return 0.0;
+    }
+    gProj = gProj.normalized();
+
+    const double sinRoll = gProj.dot(rightW);
+    const double cosRoll = gProj.dot(downW);
+    return std::atan2(sinRoll, cosRoll) * (180.0 / kPi);
+}
+
 } // namespace
 
 void TrajectoryEngine::setImuData(
@@ -154,13 +182,18 @@ void TrajectoryEngine::setImuData(
         return a.timestamp_sec < b.timestamp_sec;
     });
 
+    // Initialize world gravity from first 0.5s of accelerometer data (transformed by same AxisPreset!)
     initGravityCam_ = Vec3(0.0, 1.0, 0.0);
     if (!sortedAccel.empty()) {
-        const size_t initCount = std::min<size_t>(20, sortedAccel.size());
+        const double t0 = sortedAccel.front().timestamp_sec;
         Vec3 sumA(0.0, 0.0, 0.0);
-        for (size_t i = 0; i < initCount; ++i) {
-            const Vec3 aIos(sortedAccel[i].ax, sortedAccel[i].ay, sortedAccel[i].az);
-            sumA = sumA + applyAxisMatrix(M, aIos);
+        int initCount = 0;
+        for (const auto& a : sortedAccel) {
+            if (a.timestamp_sec > t0 + 0.5 && initCount >= 10) {
+                break;
+            }
+            sumA = sumA + applyAxisMatrix(M, Vec3(a.ax, a.ay, a.az));
+            ++initCount;
         }
         if (sumA.normSquared() > 1e-6) {
             initGravityCam_ = sumA.normalized();
@@ -193,10 +226,14 @@ void TrajectoryEngine::setImuData(
                 if (std::fabs(a.timestamp_sec - g.timestamp_sec) < 0.05) {
                     const Vec3 aCam = applyAxisMatrix(M, Vec3(a.ax, a.ay, a.az));
                     const double aNorm = aCam.norm();
-                    if (aNorm >= 0.85 && aNorm <= 1.15) {
+                    if (aNorm >= 0.88 && aNorm <= 1.12) {
                         const Vec3 aMeas = aCam * (1.0 / aNorm);
                         const Vec3 gEst = q.conjugate().rotateVector(initGravityCam_);
                         feedback = aMeas.cross(gEst) * kpMahony;
+
+                        // Adaptive low-pass gravity tracker in world coordinates
+                        const Vec3 aWorld = q.rotateVector(aMeas);
+                        initGravityCam_ = (initGravityCam_ * 0.995 + aWorld * 0.005).normalized();
                     }
                 }
             }
@@ -281,23 +318,16 @@ TrajectoryResult TrajectoryEngine::solve(
     }
 
     const double dtF = 1.0 / nominalFps_;
-    std::vector<double> omegaMag(n, 0.0);
-    for (size_t i = 1; i < n; ++i) {
-        const double angle = rotationAngleBetween(result.rawFrameQuats[i - 1], result.rawFrameQuats[i]);
-        omegaMag[i] = angle / dtF;
-    }
-    omegaMag[0] = omegaMag[1];
-
+    // Net rotational speed over ~0.3s window: intentional pans add up, while back-and-forth jitter cancels out!
     const int radius = std::max(1, static_cast<int>(std::round(0.15 * nominalFps_)));
     std::vector<double> smoothOmega(n, 0.0);
     for (size_t i = 0; i < n; ++i) {
-        const int lo = std::max(0, static_cast<int>(i) - radius);
-        const int hi = std::min(static_cast<int>(n) - 1, static_cast<int>(i) + radius);
-        double sum = 0.0;
-        for (int k = lo; k <= hi; ++k) {
-            sum += omegaMag[static_cast<size_t>(k)];
+        const size_t lo = static_cast<size_t>(std::max(0, static_cast<int>(i) - radius));
+        const size_t hi = static_cast<size_t>(std::min(static_cast<int>(n) - 1, static_cast<int>(i) + radius));
+        if (hi > lo) {
+            const double netAngle = rotationAngleBetween(result.rawFrameQuats[lo], result.rawFrameQuats[hi]);
+            smoothOmega[i] = netAngle / (static_cast<double>(hi - lo) * dtF);
         }
-        smoothOmega[i] = sum / static_cast<double>(hi - lo + 1);
     }
 
     const double pSmooth = config.pitchSmoothness;
@@ -306,64 +336,58 @@ TrajectoryResult TrajectoryEngine::solve(
 
     if (pSmooth <= 1e-4 && ySmooth <= 1e-4 && rSmooth <= 1e-4 && !config.horizonLockEnabled) {
         result.smoothFrameQuats = result.rawFrameQuats;
-        result.rawAngularAccelRms = computeAngularAccelRms(result.rawFrameQuats, dtF);
-        result.smoothAngularAccelRms = result.rawAngularAccelRms;
-        result.stabilityImprovementPct = 0.0;
-        result.valid = true;
-        return result;
+    } else {
+        std::vector<Quat> qFwd(n);
+        qFwd[0] = result.rawFrameQuats[0];
+        for (size_t i = 1; i < n; ++i) {
+            const double aPitch = computeAlphaForAxis(pSmooth, smoothOmega[i], config.velocityDamping, dtF);
+            const double aYaw = computeAlphaForAxis(ySmooth, smoothOmega[i], config.velocityDamping, dtF);
+            const double aRoll = computeAlphaForAxis(rSmooth, smoothOmega[i], config.velocityDamping, dtF);
+
+            const Vec3 rDiff = quatLog(qFwd[i - 1].conjugate() * result.rawFrameQuats[i]);
+            const Vec3 rStep(
+                rDiff.x * (1.0 - aPitch),
+                rDiff.y * (1.0 - aYaw),
+                rDiff.z * (1.0 - aRoll)
+            );
+            qFwd[i] = (qFwd[i - 1] * quatExp(rStep)).normalized();
+        }
+
+        result.smoothFrameQuats[n - 1] = qFwd[n - 1];
+        for (size_t i = n - 1; i > 0; --i) {
+            const size_t idx = i - 1;
+            const double aPitch = computeAlphaForAxis(pSmooth, smoothOmega[idx], config.velocityDamping, dtF);
+            const double aYaw = computeAlphaForAxis(ySmooth, smoothOmega[idx], config.velocityDamping, dtF);
+            const double aRoll = computeAlphaForAxis(rSmooth, smoothOmega[idx], config.velocityDamping, dtF);
+
+            const Vec3 rDiff = quatLog(result.smoothFrameQuats[idx + 1].conjugate() * qFwd[idx]);
+            const Vec3 rStep(
+                rDiff.x * (1.0 - aPitch),
+                rDiff.y * (1.0 - aYaw),
+                rDiff.z * (1.0 - aRoll)
+            );
+            result.smoothFrameQuats[idx] = (result.smoothFrameQuats[idx + 1] * quatExp(rStep)).normalized();
+        }
     }
 
-    // Forward pass in so(3) tangent space for independent Pitch/Yaw/Roll filtering
-    std::vector<Quat> qFwd(n);
-    qFwd[0] = result.rawFrameQuats[0];
-    for (size_t i = 1; i < n; ++i) {
-        const double aPitch = computeAlphaForAxis(pSmooth, smoothOmega[i], config.velocityDamping, dtF);
-        const double aYaw = computeAlphaForAxis(ySmooth, smoothOmega[i], config.velocityDamping, dtF);
-        const double aRoll = computeAlphaForAxis(rSmooth, smoothOmega[i], config.velocityDamping, dtF);
-
-        const Vec3 rDiff = quatLog(qFwd[i - 1].conjugate() * result.rawFrameQuats[i]);
-        const Vec3 rStep(
-            rDiff.x * (1.0 - aPitch),
-            rDiff.y * (1.0 - aYaw),
-            rDiff.z * (1.0 - aRoll)
-        );
-        qFwd[i] = (qFwd[i - 1] * quatExp(rStep)).normalized();
-    }
-
-    // Backward pass in so(3) tangent space (zero phase lag)
-    result.smoothFrameQuats[n - 1] = qFwd[n - 1];
-    for (size_t i = n - 1; i > 0; --i) {
-        const size_t idx = i - 1;
-        const double aPitch = computeAlphaForAxis(pSmooth, smoothOmega[idx], config.velocityDamping, dtF);
-        const double aYaw = computeAlphaForAxis(ySmooth, smoothOmega[idx], config.velocityDamping, dtF);
-        const double aRoll = computeAlphaForAxis(rSmooth, smoothOmega[idx], config.velocityDamping, dtF);
-
-        const Vec3 rDiff = quatLog(result.smoothFrameQuats[idx + 1].conjugate() * qFwd[idx]);
-        const Vec3 rStep(
-            rDiff.x * (1.0 - aPitch),
-            rDiff.y * (1.0 - aYaw),
-            rDiff.z * (1.0 - aRoll)
-        );
-        result.smoothFrameQuats[idx] = (result.smoothFrameQuats[idx + 1] * quatExp(rStep)).normalized();
-    }
-
-    // 360-degree Gimbal-free Horizon Lock around world gravity vector
+    // 360-degree Gimbal-free Horizon Lock via Gram-Schmidt orthogonalization around gravity
+    const Vec3 gWorld = initGravityCam_.normalized();
     if (config.horizonLockEnabled && config.horizonLockAmount > 1e-4) {
         const double amount = std::min(1.0, std::max(0.0, config.horizonLockAmount));
+        const double displayRotRad = static_cast<double>(config.videoRotationDegrees) * (kPi / 180.0);
         const double tiltRad = config.horizonTiltOffsetDeg * (kPi / 180.0);
-        const Quat tiltQ = Quat::fromAxisAngle(Vec3(0.0, 0.0, 1.0), tiltRad);
-        const Vec3 gWorld = initGravityCam_.normalized();
+        const Quat screenAlignQ = Quat::fromAxisAngle(Vec3(0.0, 0.0, 1.0), displayRotRad + tiltRad);
 
         for (size_t i = 0; i < n; ++i) {
-            const Vec3 forwardW = result.smoothFrameQuats[i].rotateVector(Vec3(0.0, 0.0, 1.0)).normalized();
-            Vec3 rightW = gWorld.cross(forwardW);
-            if (rightW.normSquared() < 1e-6) {
-                rightW = result.smoothFrameQuats[i].rotateVector(Vec3(1.0, 0.0, 0.0));
+            const Vec3 zc = result.smoothFrameQuats[i].rotateVector(Vec3(0.0, 0.0, 1.0)).normalized();
+            Vec3 yc = gWorld - zc * gWorld.dot(zc);
+            if (yc.normSquared() < 1e-6) {
+                yc = result.smoothFrameQuats[i].rotateVector(Vec3(0.0, 1.0, 0.0));
             }
-            rightW = rightW.normalized();
-            const Vec3 downW = forwardW.cross(rightW).normalized();
+            yc = yc.normalized();
+            const Vec3 xc = yc.cross(zc).normalized();
 
-            const Quat qHorizon = (quatFromBasis(rightW, downW, forwardW) * tiltQ).normalized();
+            const Quat qHorizon = (quatFromBasis(xc, yc, zc) * screenAlignQ).normalized();
             result.smoothFrameQuats[i] = slerpShortest(result.smoothFrameQuats[i], qHorizon, amount);
         }
     }
@@ -375,6 +399,21 @@ TrajectoryResult TrajectoryEngine::solve(
         const double rmsRatio = result.smoothAngularAccelRms / result.rawAngularAccelRms;
         result.stabilityImprovementPct = std::min(99.5, std::max(0.0, (1.0 - rmsRatio) * 100.0));
     }
+
+    // Diagnostic angular metrics for UI verification
+    double maxInRoll = 0.0;
+    double maxOutRoll = 0.0;
+    double maxCorr = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        maxInRoll = std::max(maxInRoll, std::fabs(computeRollErrorDeg(result.rawFrameQuats[i], gWorld, config.videoRotationDegrees)));
+        maxOutRoll = std::max(maxOutRoll, std::fabs(computeRollErrorDeg(result.smoothFrameQuats[i], gWorld, config.videoRotationDegrees)));
+        const double corrDeg = rotationAngleBetween(result.rawFrameQuats[i], result.smoothFrameQuats[i]) * (180.0 / kPi);
+        maxCorr = std::max(maxCorr, corrDeg);
+    }
+    result.maxInputRollDeg = maxInRoll;
+    result.maxOutputRollErrorDeg = maxOutRoll;
+    result.maxCorrectionDeg = maxCorr;
+
     result.valid = true;
     return result;
 }

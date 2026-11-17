@@ -177,6 +177,7 @@ final class StabilizeViewController: UIViewController {
         setupLayout()
         updateSliderLabels()
         handlePreview()
+        handleAutoSync()
     }
 
     private func configureControls() {
@@ -189,7 +190,7 @@ final class StabilizeViewController: UIViewController {
         configureSlider(pitchSlider, min: 0.0, max: 1.0, val: 0.65)
         configureSlider(yawSlider, min: 0.0, max: 1.0, val: 0.65)
         configureSlider(rollSlider, min: 0.0, max: 1.0, val: 0.75)
-        configureSlider(zoomSlider, min: 1.05, max: 1.60, val: 1.35)
+        configureSlider(zoomSlider, min: 1.05, max: 1.60, val: 1.25)
         configureSlider(tiltSlider, min: -15.0, max: 15.0, val: 0.0)
         configureSlider(offsetSlider, min: -80.0, max: 80.0, val: 0.0)
 
@@ -203,7 +204,7 @@ final class StabilizeViewController: UIViewController {
 
         horizonSwitch.translatesAutoresizingMaskIntoConstraints = false
         horizonSwitch.isOn = false
-        horizonSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
+        horizonSwitch.addTarget(self, action: #selector(handleHorizonToggled), for: .valueChanged)
 
         rsSwitch.translatesAutoresizingMaskIntoConstraints = false
         rsSwitch.isOn = true
@@ -345,6 +346,14 @@ final class StabilizeViewController: UIViewController {
         offsetLabel.text = String(format: "IMU Sync Offset: %+.1f ms", offsetSlider.value)
     }
 
+    @objc private func handleHorizonToggled() {
+        if horizonSwitch.isOn && zoomSlider.value < 1.50 {
+            zoomSlider.value = 1.60
+        }
+        updateSliderLabels()
+        handlePreview()
+    }
+
     @objc private func handleSliderChanged() {
         updateSliderLabels()
     }
@@ -385,9 +394,10 @@ final class StabilizeViewController: UIViewController {
         if let plan = pipeline.computePlanPreview(take: take, config: cfg), plan.valid {
             previewInfoLabel.textColor = UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0)
             previewInfoLabel.text = String(
-                format: "Frames: %u (%ux%u)\nStability Gain: %.1f%%\nSafe Zoom: [%.2fx .. %.2fx] (avg %.2fx)",
-                plan.frameCount, plan.width, plan.height,
-                plan.stabilityImprovementPct,
+                format: "Frames: %u (%ux%u, %@)\nStability Gain: %.1f%% | Max Corr: %.1f°\nRoll In: %.1f° -> Roll Out: %.1f°\nSafe Zoom: [%.2fx .. %.2fx] (avg %.2fx)",
+                plan.frameCount, plan.width, plan.height, plan.detectedOrientationName,
+                plan.stabilityImprovementPct, plan.maxCorrectionDeg,
+                plan.maxInputRollDeg, plan.maxOutputRollErrorDeg,
                 plan.minZoom, plan.maxZoom, plan.avgZoom
             )
         } else {

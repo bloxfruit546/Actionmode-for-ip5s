@@ -192,11 +192,249 @@ void testOpticalSyncOffsetAndAxisDetection() {
     );
 }
 
+uint8_t bilinearSample(const std::vector<uint8_t>& img, int w, int h, double sx, double sy) {
+    if (sx < 0.0 || sx >= w - 1 || sy < 0.0 || sy >= h - 1) {
+        return 0;
+    }
+    const int x0 = static_cast<int>(std::floor(sx));
+    const int y0 = static_cast<int>(std::floor(sy));
+    const double fx = sx - x0;
+    const double fy = sy - y0;
+    const double v00 = img[static_cast<size_t>(y0 * w + x0)];
+    const double v10 = img[static_cast<size_t>(y0 * w + x0 + 1)];
+    const double v01 = img[static_cast<size_t>((y0 + 1) * w + x0)];
+    const double v11 = img[static_cast<size_t>((y0 + 1) * w + x0 + 1)];
+    const double v0 = v00 + fx * (v10 - v00);
+    const double v1 = v01 + fx * (v11 - v01);
+    return static_cast<uint8_t>(std::min(255.0, std::max(0.0, v0 + fy * (v1 - v0))));
+}
+
+void testEndToEndPixelHorizonLock30Deg() {
+    const int w = 320, h = 180;
+    const double fx = 276.67, fy = 276.67, cx = 160.0, cy = 90.0;
+
+    // Camera rolled +30 deg around +Z_cam: q_WC = R_z(+30 deg)
+    // World gravity g_W = (0, 1, 0) -> in camera frame: a_cam = R_CW * g_W = R_z(-30) * (0,1,0) = (sin30, cos30, 0)
+    const double rollRad = 30.0 * (kPi / 180.0);
+    const gf::Vec3 aCam(std::sin(rollRad), std::cos(rollRad), 0.0);
+    // Inverse of LandscapeLeft (-y, -x, -z) -> a_ios = (-aCam.y, -aCam.x, -aCam.z)
+    const float axIos = static_cast<float>(-aCam.y);
+    const float ayIos = static_cast<float>(-aCam.x);
+    const float azIos = static_cast<float>(-aCam.z);
+
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.width = w;
+    hdr.height = h;
+    hdr.nominal_fps = 30.0;
+    hdr.lens_fx = fx;
+    hdr.lens_fy = fy;
+    hdr.lens_cx = cx;
+    hdr.lens_cy = cy;
+
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    for (int i = 0; i < 90; ++i) {
+        const double t = 1.0 + i / 90.0;
+        gyro.push_back({t, 0.0, 0.0, 0.0});
+        accel.push_back({t, axIos, ayIos, azIos});
+    }
+    std::vector<gf::GFFrameRecord> frames;
+    for (int f = 0; f < 30; ++f) {
+        frames.push_back({static_cast<uint32_t>(f), 1.1 + f / 30.0, 0.008f, 100.0f, 0.7f, 0.0});
+    }
+
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel);
+
+    gf::StabilizerConfig cfg;
+    cfg.pitchSmoothness = 0.5;
+    cfg.yawSmoothness = 0.5;
+    cfg.rollSmoothness = 0.5;
+    cfg.horizonLockEnabled = true;
+    cfg.horizonLockAmount = 1.0;
+    cfg.videoRotationDegrees = 0;
+
+    const auto traj = engine.solve(frames, cfg);
+    assert(traj.valid);
+    assert(traj.maxOutputRollErrorDeg < 0.5);
+
+    gf::CalibrationProfile prof;
+    prof.width = w;
+    prof.height = h;
+    prof.fx = fx;
+    prof.fy = fy;
+    prof.cx = cx;
+    prof.cy = cy;
+    prof.readoutTimeSec = 0.0;
+
+    const auto warp = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
+        engine, traj, prof, 30.0, 0.0, false, true
+    );
+
+    // Synthesize 320x180 source image as seen by a +30 deg rolled camera:
+    // P_world = R_z(+30) * P_cam -> y_world = x_cam * sin(30) + y_cam * cos(30)
+    // Sky (y_world < 0) = 240, Ground (y_world >= 0) = 20
+    std::vector<uint8_t> srcImg(static_cast<size_t>(w * h), 0);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const double xc = (x - cx) / fx;
+            const double yc = (y - cy) / fy;
+            const double yWorld = xc * std::sin(rollRad) + yc * std::cos(rollRad);
+            srcImg[static_cast<size_t>(y * w + x)] = (yWorld < 0.0) ? 240 : 20;
+        }
+    }
+
+    // Warp using exact H matrix from FrameWarpCalculator
+    const float* H = warp.frameLUTs[15].sliceH[0];
+    std::vector<uint8_t> dstImg(static_cast<size_t>(w * h), 0);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const double pw = H[6] * x + H[7] * y + H[8];
+            const double sx = (H[0] * x + H[1] * y + H[2]) / pw;
+            const double sy = (H[3] * x + H[4] * y + H[5]) / pw;
+            dstImg[static_cast<size_t>(y * w + x)] = bilinearSample(srcImg, w, h, sx, sy);
+        }
+    }
+
+    // Measure horizon angle in output image across x = 80..240
+    double sumX = 0.0, sumY = 0.0, sumXX = 0.0, sumXY = 0.0;
+    int count = 0;
+    for (int x = 80; x <= 240; x += 4) {
+        for (int y = 20; y < h - 20; ++y) {
+            const int vTop = dstImg[static_cast<size_t>(y * w + x)];
+            const int vBot = dstImg[static_cast<size_t>((y + 1) * w + x)];
+            if (vTop > 130 && vBot <= 130) {
+                sumX += x;
+                sumY += y + 0.5;
+                sumXX += x * x;
+                sumXY += x * (y + 0.5);
+                ++count;
+                break;
+            }
+        }
+    }
+    assert(count > 20);
+    const double slope = (count * sumXY - sumX * sumY) / (count * sumXX - sumX * sumX);
+    const double outAngleDeg = std::atan(slope) * (180.0 / kPi);
+    assert(std::fabs(outAngleDeg) < 0.5);
+    std::printf("End-to-End Pixel Horizon Lock (30 deg -> %.3f deg) PASSED.\n", outAngleDeg);
+}
+
+void testEndToEndPixelStabilizationCentroid() {
+    const int w = 320, h = 180;
+    const double fx = 276.67, fy = 276.67, cx = 160.0, cy = 90.0;
+
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.width = w;
+    hdr.height = h;
+    hdr.nominal_fps = 30.0;
+    hdr.lens_fx = fx;
+    hdr.lens_fy = fy;
+    hdr.lens_cx = cx;
+    hdr.lens_cy = cy;
+
+    // Camera experiences 6 Hz sinusoidal hand-shake (+5 deg yaw, -4 deg pitch)
+    const int nImu = 180; // 2.0s @ 90Hz
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    const double yawAmp = 5.0 * (kPi / 180.0);
+    const double pitchAmp = -4.0 * (kPi / 180.0);
+    const double omegaFreq = 2.0 * kPi * 6.0;
+
+    for (int i = 0; i < nImu; ++i) {
+        const double t = 1.0 + i / 90.0;
+        const double dAngle = omegaFreq * std::cos(omegaFreq * (t - 1.0));
+        const double wxCam = pitchAmp * dAngle;
+        const double wyCam = yawAmp * dAngle;
+        // LandscapeLeft inverse: gx_ios = -wyCam, gy_ios = -wxCam
+        gyro.push_back({t, -wyCam, -wxCam, 0.0});
+        accel.push_back({t, -1.0f, 0.0f, 0.0f});
+    }
+
+    std::vector<gf::GFFrameRecord> frames;
+    for (int f = 0; f < 55; ++f) {
+        frames.push_back({static_cast<uint32_t>(f), 1.0 + f / 30.0, 0.0, 100.0f, 0.7f, 0.0});
+    }
+
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel);
+    gf::StabilizerConfig cfg;
+    cfg.pitchSmoothness = 0.90;
+    cfg.yawSmoothness = 0.90;
+    cfg.rollSmoothness = 0.90;
+    cfg.velocityDamping = 1.0;
+
+    const auto traj = engine.solve(frames, cfg);
+    gf::CalibrationProfile prof;
+    prof.width = w; prof.height = h; prof.fx = fx; prof.fy = fy; prof.cx = cx; prof.cy = cy; prof.readoutTimeSec = 0.0;
+
+    const auto warp = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
+        engine, traj, prof, 30.0, 0.0, false, true
+    );
+
+    // At peak impulse (~t=2.0s, frame index ~28), render a bright spot at world ray (0,0,1)
+    const size_t peakIdx = 28;
+    const gf::Quat qWC = traj.rawFrameQuats[peakIdx];
+    const gf::Vec3 pCam = qWC.conjugate().rotateVector({0.0, 0.0, 1.0});
+    const double uTarget = fx * (pCam.x / pCam.z) + cx;
+    const double vTarget = fy * (pCam.y / pCam.z) + cy;
+
+    std::vector<uint8_t> srcImg(static_cast<size_t>(w * h), 0);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const double d = std::hypot(x - uTarget, y - vTarget);
+            if (d < 4.5) {
+                srcImg[static_cast<size_t>(y * w + x)] = static_cast<uint8_t>(255.0 * std::exp(-0.2 * d * d));
+            }
+        }
+    }
+
+    const float* H = warp.frameLUTs[peakIdx].sliceH[0];
+    double sumW = 0.0, sumX = 0.0, sumY = 0.0;
+    for (int y = 10; y < h - 10; ++y) {
+        for (int x = 10; x < w - 10; ++x) {
+            const double pw = H[6] * x + H[7] * y + H[8];
+            const double sx = (H[0] * x + H[1] * y + H[2]) / pw;
+            const double sy = (H[3] * x + H[4] * y + H[5]) / pw;
+            const uint8_t val = bilinearSample(srcImg, w, h, sx, sy);
+            if (val > 30) {
+                sumW += val;
+                sumX += val * x;
+                sumY += val * y;
+            }
+        }
+    }
+    assert(sumW > 100.0);
+    const double outCx = sumX / sumW;
+    const double outCy = sumY / sumW;
+
+    // Expected position of world ray (0,0,1) in the stabilized virtual camera at peakIdx
+    const gf::Quat qVirt = traj.smoothFrameQuats[peakIdx];
+    const gf::Vec3 pVirt = qVirt.conjugate().rotateVector({0.0, 0.0, 1.0});
+    const double zUsed = warp.frameLUTs[peakIdx].zoomUsed;
+    const double expCx = (fx * zUsed) * (pVirt.x / pVirt.z) + cx;
+    const double expCy = (fy * zUsed) * (pVirt.y / pVirt.z) + cy;
+
+    const double errPx = std::hypot(outCx - expCx, outCy - expCy);
+    std::printf("Centroid debug: src=(%.2f, %.2f) out=(%.2f, %.2f) exp=(%.2f, %.2f) err=%.3f px\n",
+                uTarget, vTarget, outCx, outCy, expCx, expCy, errPx);
+    std::fflush(stdout);
+    assert(traj.stabilityImprovementPct > 90.0);
+    assert(errPx < 0.5);
+    std::printf("End-to-End Pixel Stabilization Centroid (err=%.3f px) PASSED.\n", errPx);
+}
+
 } // namespace
 
 int main() {
     testHorizonLock360();
     testRollingShutterSlices();
     testOpticalSyncOffsetAndAxisDetection();
+    testEndToEndPixelHorizonLock30Deg();
+    testEndToEndPixelStabilizationCentroid();
     return 0;
 }

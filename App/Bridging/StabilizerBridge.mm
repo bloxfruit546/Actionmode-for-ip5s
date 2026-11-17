@@ -124,6 +124,7 @@ struct GFWarpFrameUniformsMetal {
 - (instancetype)init {
     self = [super init];
     if (self) {
+        _detectedOrientationName = @"Landscape (0°)";
         _errorMessage = @"";
     }
     return self;
@@ -164,7 +165,8 @@ struct GFWarpFrameUniformsMetal {
                         horizonTiltOffsetDeg:(double)horizonTiltOffsetDeg
                     rollingShutterCorrection:(BOOL)rollingShutterCorrection
                           dynamicZoomEnabled:(BOOL)dynamicZoomEnabled
-                             axisPresetIndex:(NSInteger)axisPresetIndex {
+                             axisPresetIndex:(NSInteger)axisPresetIndex
+                        videoRotationDegrees:(NSInteger)videoRotationDegrees {
     self = [super init];
     if (!self) {
         return nil;
@@ -206,6 +208,7 @@ struct GFWarpFrameUniformsMetal {
     cfg.horizonTiltOffsetDeg = horizonTiltOffsetDeg;
     cfg.rollingShutterCorrection = rollingShutterCorrection ? true : false;
     cfg.dynamicZoomEnabled = dynamicZoomEnabled ? true : false;
+    cfg.videoRotationDegrees = (int)videoRotationDegrees;
 
     const gf::TrajectoryResult traj = engine.solve(frames, cfg);
     if (!traj.valid) {
@@ -248,6 +251,14 @@ struct GFWarpFrameUniformsMetal {
     _plan.minZoom = warpRes.minZoom;
     _plan.maxZoom = warpRes.maxZoom;
     _plan.avgZoom = warpRes.avgZoom;
+    _plan.maxInputRollDeg = traj.maxInputRollDeg;
+    _plan.maxOutputRollErrorDeg = traj.maxOutputRollErrorDeg;
+    _plan.maxCorrectionDeg = traj.maxCorrectionDeg;
+    if (videoRotationDegrees == 90 || videoRotationDegrees == 270) {
+        _plan.detectedOrientationName = [NSString stringWithFormat:@"Portrait (%ld°)", (long)videoRotationDegrees];
+    } else {
+        _plan.detectedOrientationName = [NSString stringWithFormat:@"Landscape (%ld°)", (long)videoRotationDegrees];
+    }
     _plan.width = _profile.width;
     _plan.height = _profile.height;
     _plan.nominalFps = fps;

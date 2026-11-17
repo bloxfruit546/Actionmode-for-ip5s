@@ -25,6 +25,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) double minZoom;
 @property (nonatomic, assign) double maxZoom;
 @property (nonatomic, assign) double avgZoom;
+@property (nonatomic, assign) double maxInputRollDeg;
+@property (nonatomic, assign) double maxOutputRollErrorDeg;
+@property (nonatomic, assign) double maxCorrectionDeg;
+@property (nonatomic, copy) NSString *detectedOrientationName;
 @property (nonatomic, assign) uint32_t width;
 @property (nonatomic, assign) uint32_t height;
 @property (nonatomic, assign) double nominalFps;
@@ -47,7 +51,8 @@ NS_ASSUME_NONNULL_BEGIN
                         horizonTiltOffsetDeg:(double)horizonTiltOffsetDeg
                     rollingShutterCorrection:(BOOL)rollingShutterCorrection
                           dynamicZoomEnabled:(BOOL)dynamicZoomEnabled
-                             axisPresetIndex:(NSInteger)axisPresetIndex;
+                             axisPresetIndex:(NSInteger)axisPresetIndex
+                        videoRotationDegrees:(NSInteger)videoRotationDegrees;
 
 - (BOOL)warpPixelBuffer:(CVPixelBufferRef)srcPixelBuffer
         intoPixelBuffer:(CVPixelBufferRef)dstPixelBuffer
