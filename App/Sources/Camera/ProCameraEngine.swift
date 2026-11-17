@@ -149,15 +149,6 @@ final class ProCameraEngine: NSObject {
         }
     }
 
-    func stopSession() {
-        sessionQueue.async { [weak self] in
-            self?.stopTelemetryTimer()
-            if self?.session.isRunning == true {
-                self?.session.stopRunning()
-            }
-        }
-    }
-
     func setCaptureMode(_ mode: CaptureMode, completion: (() -> Void)? = nil) {
         sessionQueue.async { [weak self] in
             guard let self = self, !self.isRecording else {

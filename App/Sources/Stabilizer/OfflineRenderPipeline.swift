@@ -196,7 +196,7 @@ final class OfflineRenderPipeline {
                             return
                         }
 
-                        _ = bridge.warpPixelBuffer(srcPB, intoPixelBuffer: dstPB, frameIndex: UInt(frameIndex))
+                        _ = bridge.warpPixelBuffer(srcPB, into: dstPB, frameIndex: UInt(frameIndex))
                         _ = adaptor.append(dstPB, withPresentationTime: pts)
 
                         frameIndex += 1
