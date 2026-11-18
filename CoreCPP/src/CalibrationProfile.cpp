@@ -13,8 +13,8 @@ CalibrationProfile CalibrationProfile::defaultIPhone5s1080p30() {
     p.fy = 1660.0;
     p.cx = 960.0;
     p.cy = 540.0;
-    p.k1 = 0.042;
-    p.k2 = -0.115;
+    p.k1 = 0.012;
+    p.k2 = -0.022;
     p.p1 = 0.0;
     p.p2 = 0.0;
     p.readoutTimeSec = 0.0152;
@@ -29,8 +29,8 @@ CalibrationProfile CalibrationProfile::defaultIPhone5s720p120() {
     p.fy = 1106.67;
     p.cx = 640.0;
     p.cy = 360.0;
-    p.k1 = 0.042;
-    p.k2 = -0.115;
+    p.k1 = 0.012;
+    p.k2 = -0.022;
     p.p1 = 0.0;
     p.p2 = 0.0;
     p.readoutTimeSec = 0.0074;

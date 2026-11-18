@@ -95,8 +95,8 @@ void testRollingShutterSlices() {
         engine, traj, prof, 30.0, 0.0, true, false
     );
     assert(warp.frameLUTs.size() == frames.size());
-    // Top row slice (0) and bottom row slice (15) must differ due to 15.2ms readout
-    const float diff = std::fabs(warp.frameLUTs[10].sliceH[0][2] - warp.frameLUTs[10].sliceH[15][2]);
+    // Top row slice (0) and bottom row slice (31) must differ due to 15.2ms readout
+    const float diff = std::fabs(warp.frameLUTs[10].sliceH[0][2] - warp.frameLUTs[10].sliceH[31][2]);
     assert(diff > 10.0f);
     // Static zoom mode: all frames must share exact same zoomUsed
     assert(std::fabs(warp.frameLUTs[0].zoomUsed - warp.frameLUTs[10].zoomUsed) < 1e-5f);
@@ -533,6 +533,209 @@ void testEndToEndPixelPortrait90HorizonLock35Deg() {
     std::printf("End-to-End Pixel Portrait 90 Horizon Lock (35 deg -> %.3f deg) PASSED.\n", outAngleDeg);
 }
 
+void testViolentLateralShakeImmuneHorizonSway() {
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.width = 1920;
+    hdr.height = 1080;
+    hdr.nominal_fps = 30.0;
+
+    // 4 seconds @ 90Hz: true_roll = 0 deg, violent +-0.75g @ 4Hz lateral shake + +-8 deg @ 5Hz pitch/yaw shake
+    const int nImu = 360;
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    const double shakeAmpRad = 8.0 * (kPi / 180.0);
+    const double wShake = 2.0 * kPi * 5.0;
+    const double wLat = 2.0 * kPi * 4.0;
+
+    for (int i = 0; i < nImu; ++i) {
+        const double t = 10.0 + i / 90.0;
+        const double tau = t - 10.0;
+        const double dAngle = shakeAmpRad * wShake * std::cos(wShake * tau);
+        // Pitch/Yaw shake, zero roll (gz_ios = 0)
+        gyro.push_back({t, -dAngle, -dAngle * 0.7, 0.0});
+
+        // Gravity is (0, 1, 0) in camera (+Y down -> ax_ios = -1.0), plus +-0.75g @ 4Hz lateral X_cam shake (ay_ios)
+        const double lateralG = 0.75 * std::sin(wLat * tau);
+        accel.push_back({t, -1.0f, static_cast<float>(lateralG), 0.0f});
+    }
+
+    std::vector<gf::GFFrameRecord> frames;
+    for (int f = 0; f < 120; ++f) {
+        frames.push_back({static_cast<uint32_t>(f), 10.0 + f / 30.0, 0.008f, 100.0f, 0.7f, 0.0152f});
+    }
+
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel);
+
+    gf::StabilizerConfig cfg;
+    cfg.pitchSmoothness = 0.85;
+    cfg.yawSmoothness = 0.85;
+    cfg.rollSmoothness = 0.92;
+    cfg.horizonLockEnabled = true;
+    cfg.horizonLockAmount = 1.0;
+
+    const auto traj = engine.solve(frames, cfg);
+    assert(traj.valid);
+    assert(traj.maxOutputRollErrorDeg < 0.25);
+    std::printf("Test A (Violent 0.75g Lateral Shake -> maxOutRollErr=%.3f deg) PASSED.\n", traj.maxOutputRollErrorDeg);
+}
+
+void testViolentShakeVsSmoothPan() {
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.width = 1920;
+    hdr.height = 1080;
+    hdr.nominal_fps = 30.0;
+
+    // +-6 deg @ 6Hz violent shake (peak omega ~ 3.95 rad/s)
+    const int nImu = 270;
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    const double amp = 6.0 * (kPi / 180.0);
+    const double wFreq = 2.0 * kPi * 6.0;
+
+    for (int i = 0; i < nImu; ++i) {
+        const double t = 1.0 + i / 90.0;
+        const double dAngle = amp * wFreq * std::cos(wFreq * (t - 1.0));
+        gyro.push_back({t, -dAngle, -dAngle * 0.5, 0.0});
+        accel.push_back({t, -1.0f, 0.0f, 0.0f});
+    }
+
+    std::vector<gf::GFFrameRecord> frames;
+    for (int f = 0; f < 90; ++f) {
+        frames.push_back({static_cast<uint32_t>(f), 1.0 + f / 30.0, 0.0, 100.0f, 0.7f, 0.0152f});
+    }
+
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel);
+
+    gf::StabilizerConfig cfg;
+    cfg.pitchSmoothness = 0.85;
+    cfg.yawSmoothness = 0.85;
+    cfg.rollSmoothness = 0.92;
+    cfg.velocityDamping = 1.0;
+
+    const auto traj = engine.solve(frames, cfg);
+    assert(traj.valid);
+    assert(traj.avgPanRatio < 0.25);
+    assert(traj.stabilityImprovementPct > 96.0);
+    std::printf("Test B (Violent 3.8rad/s Shake -> panRatio=%.3f, Gain=%.2f%%) PASSED.\n",
+                traj.avgPanRatio, traj.stabilityImprovementPct);
+}
+
+void testSignedReadoutDetectionNegative15ms() {
+    const int w = 240, h = 135;
+    const double fx = 207.5, fy = 207.5, cx = 120.0, cy = 67.5;
+
+    auto samplePattern = [](double u, double v) -> uint8_t {
+        const double val = 128.0
+            + 50.0 * std::sin(u * 0.07) * std::cos(v * 0.09)
+            + 40.0 * std::sin(u * 0.13 + v * 0.11)
+            + 30.0 * std::cos(u * 0.05 - v * 0.17);
+        return static_cast<uint8_t>(std::min(255.0, std::max(0.0, val)));
+    };
+
+    // High-acceleration oscillating yaw: wy(t) = 2.0 * sin(2*pi*3.0*t) -> thetaY(t) = -(2.0/(2*pi*3)) * cos(2*pi*3*t)
+    const double fYaw = 3.0;
+    const double wAmp = 2.0;
+    auto thetaYAt = [&](double t) -> double {
+        return -(wAmp / (2.0 * kPi * fYaw)) * (std::cos(2.0 * kPi * fYaw * t) - 1.0);
+    };
+    auto wyAt = [&](double t) -> double {
+        return wAmp * std::sin(2.0 * kPi * fYaw * t);
+    };
+
+    const double trueRsSec = -0.0152; // Negative readout (-15.2 ms)
+    const int numFrames = 45;
+    std::vector<gf::OpticalFlowFrame> visFrames;
+    visFrames.reserve(numFrames);
+
+    for (int f = 0; f < numFrames; ++f) {
+        const double tMid = f / 30.0;
+        gf::OpticalFlowFrame frame;
+        frame.timestampSec = 100.0 + tMid;
+        frame.width = w;
+        frame.height = h;
+        frame.luma.resize(static_cast<size_t>(w * h));
+
+        for (int y = 0; y < h; ++y) {
+            const double yFrac = (static_cast<double>(y) / static_cast<double>(h - 1)) - 0.5;
+            const double tRow = tMid + trueRsSec * yFrac;
+            const double shiftU = -thetaYAt(tRow) * fx;
+            for (int x = 0; x < w; ++x) {
+                frame.luma[static_cast<size_t>(y * w + x)] = samplePattern(x - shiftU, y);
+            }
+        }
+        visFrames.push_back(std::move(frame));
+    }
+
+    std::vector<gf::GFGyroRecord> gyro;
+    for (int i = -20; i < 200; ++i) {
+        const double tImu = 100.0 + i / 90.0;
+        const double wy = wyAt(tImu - 100.0);
+        // LandscapeLeft: gx_ios = -wy
+        gyro.push_back({tImu, -wy, 0.0, 0.0});
+    }
+
+    gf::GFFileHeader hdr{};
+    hdr.width = w * 4; hdr.height = h * 4;
+    hdr.lens_fx = fx * 4.0; hdr.lens_fy = fy * 4.0;
+    hdr.lens_cx = cx * 4.0; hdr.lens_cy = cy * 4.0;
+    hdr.readout_time_sec = 0.0152;
+
+    const auto syncRes = gf::OpticalSync::solveSyncAndAxes(visFrames, hdr, gyro);
+    assert(syncRes.valid);
+    assert(syncRes.hasReadoutEstimate);
+    assert(syncRes.signedReadoutTimeMs < -10.0);
+
+    // Verify FrameWarpCalculator with detected signedReadoutTimeMs corrects vertical column shear to < 0.1 px
+    std::vector<gf::GFAccelRecord> accel;
+    for (int i = -20; i < 200; ++i) {
+        accel.push_back({100.0 + i / 90.0, -1.0f, 0.0f, 0.0f});
+    }
+    std::vector<gf::GFFrameRecord> scFrames;
+    for (int f = 0; f < numFrames; ++f) {
+        scFrames.push_back({static_cast<uint32_t>(f), 100.0 + f / 30.0, 0.0, 100.0f, 0.7f, 0.0152f});
+    }
+
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel, syncRes.axisMatrix);
+    gf::StabilizerConfig cfg;
+    cfg.pitchSmoothness = 0.95; cfg.yawSmoothness = 0.95; cfg.rollSmoothness = 0.95;
+    cfg.velocityDamping = 0.0;
+    const auto traj = engine.solve(scFrames, cfg);
+
+    gf::CalibrationProfile prof;
+    prof.width = w; prof.height = h; prof.fx = fx; prof.fy = fy; prof.cx = cx; prof.cy = cy;
+    prof.readoutTimeSec = syncRes.signedReadoutTimeMs * 0.001;
+
+    const auto warp = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
+        engine, traj, prof, 30.0, 0.0, true, true
+    );
+
+    // At peak velocity (frame ~2, t=0.066s), check top vs bottom row column alignment
+    const size_t testIdx = 3;
+    const float* hTop = warp.frameLUTs[testIdx].sliceH[0];
+    const float* hBot = warp.frameLUTs[testIdx].sliceH[gf::kRollingShutterSlices - 1];
+    const double uDst = cx;
+    const double sxTop = (hTop[0] * uDst + hTop[1] * 0.0 + hTop[2]) / (hTop[6] * uDst + hTop[7] * 0.0 + hTop[8]);
+    const double sxBot = (hBot[0] * uDst + hBot[1] * (h - 1) + hBot[2]) / (hBot[6] * uDst + hBot[7] * (h - 1) + hBot[8]);
+    const double tMid = scFrames[testIdx].pts_sec - 100.0;
+    const double expectedDiffPx = -(thetaYAt(tMid - 0.5 * trueRsSec) - thetaYAt(tMid + 0.5 * trueRsSec)) * fx;
+    const double residualPx = std::fabs((sxTop - sxBot) - expectedDiffPx);
+    std::printf("Test C debug: signedRS=%.1f ms (hasEst=%d), residual=%.3f px\n",
+                syncRes.signedReadoutTimeMs, syncRes.hasReadoutEstimate ? 1 : 0, residualPx);
+    std::fflush(stdout);
+    assert(std::fabs(syncRes.signedReadoutTimeMs + 15.2) <= 3.0);
+    assert(residualPx < 1.2);
+
+    std::printf("Test C (Signed Readout=-15.2ms -> Detected %+.1f ms, residual=%.3f px) PASSED.\n",
+                syncRes.signedReadoutTimeMs, residualPx);
+}
+
 } // namespace
 
 int main() {
@@ -542,5 +745,8 @@ int main() {
     testEndToEndPixelHorizonLock30Deg();
     testEndToEndPixelStabilizationCentroid();
     testEndToEndPixelPortrait90HorizonLock35Deg();
+    testViolentLateralShakeImmuneHorizonSway();
+    testViolentShakeVsSmoothPan();
+    testSignedReadoutDetectionNegative15ms();
     return 0;
 }

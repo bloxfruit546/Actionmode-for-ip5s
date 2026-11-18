@@ -9,6 +9,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) double bestNCC;
 @property (nonatomic, assign) NSInteger bestAxisPresetIndex;
 @property (nonatomic, copy) NSString *axisPresetName;
+@property (nonatomic, assign) double signedReadoutTimeMs;
+@property (nonatomic, assign) BOOL hasReadoutEstimate;
 @property (nonatomic, copy) NSString *diagnosticMessage;
 @end
 
@@ -54,7 +56,9 @@ NS_ASSUME_NONNULL_BEGIN
                     rollingShutterCorrection:(BOOL)rollingShutterCorrection
                           dynamicZoomEnabled:(BOOL)dynamicZoomEnabled
                              axisPresetIndex:(NSInteger)axisPresetIndex
-                        videoRotationDegrees:(NSInteger)videoRotationDegrees;
+                        videoRotationDegrees:(NSInteger)videoRotationDegrees
+                       hasReadoutOverride:(BOOL)hasReadoutOverride
+                      signedReadoutTimeMs:(double)signedReadoutTimeMs;
 
 - (BOOL)warpPixelBuffer:(CVPixelBufferRef)srcPixelBuffer
         intoPixelBuffer:(CVPixelBufferRef)dstPixelBuffer

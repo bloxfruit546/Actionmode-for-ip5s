@@ -172,6 +172,7 @@ bool OpticalSync::estimateVisualOmega(
     struct FlowObs {
         double x, y, dx, dy;
         double weight;
+        int gy;
     };
     std::vector<FlowObs> obs;
     obs.reserve(gridCols * gridRows);
@@ -282,7 +283,8 @@ bool OpticalSync::estimateVisualOmega(
                 (static_cast<double>(bestV) - cy) / fy,
                 du / fx,
                 dv / fy,
-                1.0
+                1.0,
+                gy
             });
         }
     }
@@ -442,11 +444,153 @@ OpticalSyncResult OpticalSync::solveSyncAndAxes(
     result.axisPresetName = presets[bestPreset].name;
     std::copy(std::begin(presets[bestPreset].m), std::end(presets[bestPreset].m), std::begin(result.axisMatrix));
 
-    char buf[160];
+    // Estimate signed rolling-shutter readout time (top-half vs bottom-half row lag)
+    const double defaultRsMs = (header.readout_time_sec > 1e-5) ? (header.readout_time_sec * 1000.0) : 15.2;
+    result.signedReadoutTimeMs = defaultRsMs;
+    result.hasReadoutEstimate = false;
+
+    if (bestNccOverall >= 0.60 && frames.size() >= 15) {
+        const double* M = presets[bestPreset].m;
+        const double offSec = refinedOffsetMs * 0.001;
+
+        // Helper to estimate visual omega restricted to top (gy < 2) or bottom (gy >= 2) half
+        struct HalfVis {
+            double tMid;
+            double yFracTop, yFracBot;
+            double wxTop, wyTop, wzTop;
+            double wxBot, wyBot, wzBot;
+        };
+        std::vector<HalfVis> halfSamples;
+        for (size_t i = 1; i < frames.size(); ++i) {
+            const auto& f0 = frames[i - 1];
+            const auto& f1 = frames[i];
+            const int w = f0.width;
+            const int h = f0.height;
+            const double dt = f1.timestampSec - f0.timestampSec;
+            if (w < 64 || h < 64 || dt <= 1e-4 || dt > 0.25) continue;
+
+            auto solveHalf = [&](int gyStart, int gyEnd, double& outYFrac, double& owx, double& owy, double& owz) -> bool {
+                const int margin = 20;
+                const int gridCols = 6;
+                const int gridRows = 4;
+                const int cellW = (w - 2 * margin) / gridCols;
+                const int cellH = (h - 2 * margin) / gridRows;
+                struct HFlow { double x, y, dx, dy; };
+                std::vector<HFlow> hobs;
+                double yFracSum = 0.0;
+                for (int gy = gyStart; gy < gyEnd; ++gy) {
+                    for (int gx = 0; gx < gridCols; ++gx) {
+                        const int xStart = margin + gx * cellW;
+                        const int yStart = margin + gy * cellH;
+                        int bestU = xStart + cellW / 2, bestV = yStart + cellH / 2, bestScore = -1;
+                        for (int v = yStart + 2; v < yStart + cellH - 2; v += 2) {
+                            for (int u = xStart + 2; u < xStart + cellW - 2; u += 2) {
+                                const int ix = static_cast<int>(f0.luma[v * w + u + 1]) - static_cast<int>(f0.luma[v * w + u - 1]);
+                                const int iy = static_cast<int>(f0.luma[(v + 1) * w + u]) - static_cast<int>(f0.luma[(v - 1) * w + u]);
+                                const int sc = std::min(std::abs(ix), std::abs(iy));
+                                if (sc > bestScore) { bestScore = sc; bestU = u; bestV = v; }
+                            }
+                        }
+                        if (bestScore < 6) continue;
+                        const int fRad = 4, fSearch = 18;
+                        if (bestU - fRad < 1 || bestU + fRad >= w - 1 ||
+                            bestV - fRad < 1 || bestV + fRad >= h - 1) continue;
+                        const int uMin = std::max(1 + fRad, bestU - fSearch);
+                        const int uMax = std::min(w - 2 - fRad, bestU + fSearch);
+                        const int vMin = std::max(1 + fRad, bestV - fSearch);
+                        const int vMax = std::min(h - 2 - fRad, bestV + fSearch);
+                        int bU = bestU, bV = bestV, bSad = 1 << 30;
+                        for (int tv = vMin; tv <= vMax; ++tv) {
+                            for (int tu = uMin; tu <= uMax; ++tu) {
+                                const int sad = computeSadPatch(f0.luma.data(), w, f1.luma.data(), w, bestU, bestV, tu, tv, fRad);
+                                if (sad < bSad) { bSad = sad; bU = tu; bV = tv; }
+                            }
+                        }
+                        double subU = bU, subV = bV;
+                        if (bU - fRad - 1 >= 0 && bU + fRad + 1 < w) {
+                            const int sL = computeSadPatch(f0.luma.data(), w, f1.luma.data(), w, bestU, bestV, bU - 1, bV, fRad);
+                            const int sR = computeSadPatch(f0.luma.data(), w, f1.luma.data(), w, bestU, bestV, bU + 1, bV, fRad);
+                            const double den = 2.0 * (sL - 2.0 * bSad + sR);
+                            if (std::fabs(den) > 1e-6) subU += std::min(0.5, std::max(-0.5, (sL - sR) / den));
+                        }
+                        if (bV - fRad - 1 >= 0 && bV + fRad + 1 < h) {
+                            const int sU = computeSadPatch(f0.luma.data(), w, f1.luma.data(), w, bestU, bestV, bU, bV - 1, fRad);
+                            const int sD = computeSadPatch(f0.luma.data(), w, f1.luma.data(), w, bestU, bestV, bU, bV + 1, fRad);
+                            const double den = 2.0 * (sU - 2.0 * bSad + sD);
+                            if (std::fabs(den) > 1e-6) subV += std::min(0.5, std::max(-0.5, (sU - sD) / den));
+                        }
+                        hobs.push_back({(bestU - cx) / fx, (bestV - cy) / fy, (subU - bestU) / fx, (subV - bestV) / fy});
+                        yFracSum += (static_cast<double>(bestV) / static_cast<double>(h - 1)) - 0.5;
+                    }
+                }
+                if (hobs.size() < 4) return false;
+                outYFrac = yFracSum / static_cast<double>(hobs.size());
+                double ATA[3][3] = {}, ATb[3] = {}, x[3] = {};
+                for (const auto& o : hobs) {
+                    const double rx[3] = {o.x * o.y, -(1.0 + o.x * o.x), o.y};
+                    const double ry[3] = {(1.0 + o.y * o.y), -o.x * o.y, -o.x};
+                    for (int r = 0; r < 3; ++r) {
+                        for (int c = 0; c < 3; ++c) ATA[r][c] += rx[r] * rx[c] + ry[r] * ry[c];
+                        ATb[r] += rx[r] * o.dx + ry[r] * o.dy;
+                    }
+                }
+                if (!solve3x3(ATA, ATb, x)) return false;
+                owx = x[0] / dt; owy = x[1] / dt; owz = x[2] / dt;
+                return true;
+            };
+
+            HalfVis hv{};
+            hv.tMid = 0.5 * (f0.timestampSec + f1.timestampSec);
+            if (solveHalf(0, 2, hv.yFracTop, hv.wxTop, hv.wyTop, hv.wzTop) &&
+                solveHalf(2, 4, hv.yFracBot, hv.wxBot, hv.wyBot, hv.wzBot)) {
+                halfSamples.push_back(hv);
+            }
+        }
+
+        if (halfSamples.size() >= 6) {
+            double bestErr = 1e18;
+            double worstErr = 0.0;
+            double bestRsMs = defaultRsMs;
+            for (int rs = -20; rs <= 20; ++rs) {
+                const double rsSec = rs * 0.001;
+                double errSum = 0.0;
+                for (const auto& hv : halfSamples) {
+                    const auto gTop = sampleGyroAt(sortedGyro, hv.tMid + offSec + hv.yFracTop * rsSec);
+                    const double tgx = gTop.gx - header.gyro_bias_x, tgy = gTop.gy - header.gyro_bias_y, tgz = gTop.gz - header.gyro_bias_z;
+                    const double itx = M[0] * tgx + M[1] * tgy + M[2] * tgz;
+                    const double ity = M[3] * tgx + M[4] * tgy + M[5] * tgz;
+                    const double itz = M[6] * tgx + M[7] * tgy + M[8] * tgz;
+
+                    const auto gBot = sampleGyroAt(sortedGyro, hv.tMid + offSec + hv.yFracBot * rsSec);
+                    const double bgx = gBot.gx - header.gyro_bias_x, bgy = gBot.gy - header.gyro_bias_y, bgz = gBot.gz - header.gyro_bias_z;
+                    const double ibx = M[0] * bgx + M[1] * bgy + M[2] * bgz;
+                    const double iby = M[3] * bgx + M[4] * bgy + M[5] * bgz;
+                    const double ibz = M[6] * bgx + M[7] * bgy + M[8] * bgz;
+
+                    const double dTop = (hv.wxTop - itx) * (hv.wxTop - itx) + (hv.wyTop - ity) * (hv.wyTop - ity) + (hv.wzTop - itz) * (hv.wzTop - itz);
+                    const double dBot = (hv.wxBot - ibx) * (hv.wxBot - ibx) + (hv.wyBot - iby) * (hv.wyBot - iby) + (hv.wzBot - ibz) * (hv.wzBot - ibz);
+                    errSum += dTop + dBot;
+                }
+                if (errSum < bestErr) {
+                    bestErr = errSum;
+                    bestRsMs = static_cast<double>(rs);
+                }
+                if (errSum > worstErr) {
+                    worstErr = errSum;
+                }
+            }
+            if (worstErr > bestErr * 1.03) {
+                result.signedReadoutTimeMs = bestRsMs;
+                result.hasReadoutEstimate = true;
+            }
+        }
+    }
+
+    char buf[200];
     std::snprintf(
         buf, sizeof(buf),
-        "Auto-Sync: %+.1f ms | NCC: %.3f | Axis: %s",
-        result.bestOffsetMs, result.bestNCC, result.axisPresetName.c_str()
+        "Auto-Sync: %+.1f ms | NCC: %.3f | RS: %+.1f ms | Axis: %s",
+        result.bestOffsetMs, result.bestNCC, result.signedReadoutTimeMs, result.axisPresetName.c_str()
     );
     result.diagnosticMessage = buf;
     return result;

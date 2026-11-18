@@ -7,6 +7,8 @@ final class StabilizeViewController: UIViewController {
     private var isRendering = false
     private var lastExportedURL: URL?
     private var detectedAxisPresetIndex: Int = -1
+    private var hasReadoutOverride: Bool = false
+    private var detectedSignedReadoutMs: Double = 15.2
 
     private let scrollView: UIScrollView = {
         let sv = UIScrollView()
@@ -19,6 +21,17 @@ final class StabilizeViewController: UIViewController {
         let v = UIView()
         v.translatesAutoresizingMaskIntoConstraints = false
         return v
+    }()
+
+    private let ultraGimbalButton: UIButton = {
+        let btn = UIButton(type: .system)
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        btn.setTitle("ULTRA GIMBAL (MAX SMOOTH)", for: .normal)
+        btn.setTitleColor(.white, for: .normal)
+        btn.titleLabel?.font = UIFont.systemFont(ofSize: 13, weight: .heavy)
+        btn.backgroundColor = UIColor(red: 0.08, green: 0.62, blue: 0.58, alpha: 1.0)
+        btn.layer.cornerRadius = 8
+        return btn
     }()
 
     private let autoSyncButton: UIButton = {
@@ -220,6 +233,7 @@ final class StabilizeViewController: UIViewController {
         rsSwitch.isOn = true
         rsSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
 
+        ultraGimbalButton.addTarget(self, action: #selector(handleUltraGimbalPreset), for: .touchUpInside)
         autoSyncButton.addTarget(self, action: #selector(handleAutoSync), for: .touchUpInside)
         previewButton.addTarget(self, action: #selector(handlePreview), for: .touchUpInside)
         renderButton.addTarget(self, action: #selector(handleRenderTap), for: .touchUpInside)
@@ -255,6 +269,7 @@ final class StabilizeViewController: UIViewController {
         let rsRow = makeSwitchRow(rsLabel, rsSwitch)
 
         let stack = UIStackView(arrangedSubviews: [
+            ultraGimbalButton,
             autoSyncButton,
             autoSyncLabel,
             pitchLabel,
@@ -305,6 +320,7 @@ final class StabilizeViewController: UIViewController {
             stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
             stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -28),
 
+            ultraGimbalButton.heightAnchor.constraint(equalToConstant: 40),
             autoSyncButton.heightAnchor.constraint(equalToConstant: 40),
             previewButton.heightAnchor.constraint(equalToConstant: 38),
             renderButton.heightAnchor.constraint(equalToConstant: 46),
@@ -328,8 +344,23 @@ final class StabilizeViewController: UIViewController {
             horizonTiltOffsetDeg: Double(tiltSlider.value),
             rollingShutterCorrection: rsSwitch.isOn,
             dynamicZoomEnabled: dynamicZoomSwitch.isOn,
-            axisPresetIndex: detectedAxisPresetIndex
+            axisPresetIndex: detectedAxisPresetIndex,
+            hasReadoutOverride: hasReadoutOverride,
+            signedReadoutTimeMs: detectedSignedReadoutMs
         )
+    }
+
+    @objc private func handleUltraGimbalPreset() {
+        pitchSlider.value = 0.85
+        yawSlider.value = 0.85
+        rollSlider.value = 0.92
+        horizonSwitch.isOn = true
+        unlimitedZoomSwitch.isOn = false
+        zoomSlider.value = 1.60
+        rsSwitch.isOn = true
+        dynamicZoomSwitch.isOn = true
+        updateSliderLabels()
+        handlePreview()
     }
 
     private func updateSliderLabels() {
@@ -388,6 +419,8 @@ final class StabilizeViewController: UIViewController {
             case .success(let res):
                 if res.valid && res.bestNCC >= 0.35 {
                     self.detectedAxisPresetIndex = res.bestAxisPresetIndex
+                    self.hasReadoutOverride = res.hasReadoutEstimate
+                    self.detectedSignedReadoutMs = res.signedReadoutTimeMs
                     self.offsetSlider.value = Float(res.bestOffsetMs)
                     self.updateSliderLabels()
                     self.autoSyncLabel.textColor = UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0)

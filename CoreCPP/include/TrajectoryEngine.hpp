@@ -37,6 +37,7 @@ struct TrajectoryResult {
     double maxOutputRollErrorDeg = 0.0;
     double maxCorrectionDeg = 0.0;
     int detectedGravityQuadrantDeg = 0;
+    double avgPanRatio = 0.0;
     bool valid = false;
 };
 
@@ -50,6 +51,7 @@ public:
     );
 
     Quat sampleRawQuaternionAt(double timestampSec) const;
+    Vec3 sampleGravityWorldAt(double timestampSec) const;
 
     TrajectoryResult solve(
         const std::vector<GFFrameRecord>& frames,
@@ -61,6 +63,7 @@ private:
         double timestampSec;
         Quat quat;
         Vec3 omegaCam;
+        Vec3 gravityWorld;
     };
 
     std::vector<ImuSample> integratedSamples_;

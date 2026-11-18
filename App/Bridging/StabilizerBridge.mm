@@ -18,7 +18,7 @@ struct GFMtlRowSlice {
 };
 
 struct GFWarpFrameUniformsMetal {
-    GFMtlRowSlice slices[16];
+    GFMtlRowSlice slices[32];
     simd_uint2 outSize;
     simd_uint2 inSize;
     simd_uint2 lumaOutSize;
@@ -114,6 +114,8 @@ struct GFWarpFrameUniformsMetal {
     out.bestNCC = res.bestNCC;
     out.bestAxisPresetIndex = res.bestAxisPresetIndex;
     out.axisPresetName = [NSString stringWithUTF8String:res.axisPresetName.c_str()] ?: @"";
+    out.signedReadoutTimeMs = res.signedReadoutTimeMs;
+    out.hasReadoutEstimate = res.hasReadoutEstimate ? YES : NO;
     out.diagnosticMessage = [NSString stringWithUTF8String:res.diagnosticMessage.c_str()] ?: @"";
     return out;
 }
@@ -167,7 +169,9 @@ struct GFWarpFrameUniformsMetal {
                     rollingShutterCorrection:(BOOL)rollingShutterCorrection
                           dynamicZoomEnabled:(BOOL)dynamicZoomEnabled
                              axisPresetIndex:(NSInteger)axisPresetIndex
-                        videoRotationDegrees:(NSInteger)videoRotationDegrees {
+                        videoRotationDegrees:(NSInteger)videoRotationDegrees
+                       hasReadoutOverride:(BOOL)hasReadoutOverride
+                      signedReadoutTimeMs:(double)signedReadoutTimeMs {
     self = [super init];
     if (!self) {
         return nil;
@@ -233,6 +237,14 @@ struct GFWarpFrameUniformsMetal {
         _profile.p1 = hdr.dist_p1;
         _profile.p2 = hdr.dist_p2;
         _profile.readoutTimeSec = hdr.readout_time_sec;
+        // Upgrade legacy over-strong Phase 2/3/4 default distortion coefficients
+        if (std::fabs(_profile.k1 - 0.042) < 1e-4 && std::fabs(_profile.k2 + 0.115) < 1e-4) {
+            _profile.k1 = 0.012;
+            _profile.k2 = -0.022;
+        }
+    }
+    if (hasReadoutOverride) {
+        _profile.readoutTimeSec = signedReadoutTimeMs * 0.001;
     }
 
     const double fps = (hdr.nominal_fps > 1.0) ? hdr.nominal_fps : 30.0;
@@ -381,7 +393,7 @@ struct GFWarpFrameUniformsMetal {
     id<MTLComputeCommandEncoder> enc = [cmdBuf computeCommandEncoder];
 
     GFWarpFrameUniformsMetal lumaU{};
-    for (int s = 0; s < 16; ++s) {
+    for (int s = 0; s < gf::kRollingShutterSlices; ++s) {
         lumaU.slices[s].hRow0 = simd_make_float4(lut.sliceH[s][0], lut.sliceH[s][1], lut.sliceH[s][2], 0.0f);
         lumaU.slices[s].hRow1 = simd_make_float4(lut.sliceH[s][3], lut.sliceH[s][4], lut.sliceH[s][5], 0.0f);
         lumaU.slices[s].hRow2 = simd_make_float4(lut.sliceH[s][6], lut.sliceH[s][7], lut.sliceH[s][8], 0.0f);

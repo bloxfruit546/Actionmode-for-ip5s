@@ -22,6 +22,8 @@ struct OpticalSyncResult {
     int bestAxisPresetIndex = 0;
     std::string axisPresetName;
     double axisMatrix[9] = {0, -1, 0, -1, 0, 0, 0, 0, -1};
+    double signedReadoutTimeMs = 15.2;
+    bool hasReadoutEstimate = false;
     std::string diagnosticMessage;
 };
 

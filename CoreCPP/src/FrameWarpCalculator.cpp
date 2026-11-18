@@ -238,18 +238,23 @@ WarpComputationResult FrameWarpCalculator::computeAllFramesWithRollingShutter(
         );
     }
 
-    // Step 3: Smooth upper-envelope zoom curve (zero-phase two-pass IIR, clamped >= zMin[i])
+    // Step 3: Ultra-smooth 3-pass upper-envelope zoom curve (tau_zoom = 1.4s, clamped >= zMin[i])
     std::vector<double> zSmooth = zMin;
     if (dynamicZoomEnabled) {
-        const double alphaZoom = std::exp(-dt / 0.5);
+        const double alphaZoom = std::exp(-dt / 1.4);
         std::vector<double> zFwd = zMin;
-        for (size_t i = 1; i < n; ++i) {
-            zFwd[i] = std::max(zMin[i], alphaZoom * zFwd[i - 1] + (1.0 - alphaZoom) * zMin[i]);
-        }
-        zSmooth = zFwd;
-        for (size_t i = n - 1; i > 0; --i) {
-            const size_t idx = i - 1;
-            zSmooth[idx] = std::max(zMin[idx], alphaZoom * zSmooth[idx + 1] + (1.0 - alphaZoom) * zFwd[idx]);
+        std::vector<double> zBwd = zMin;
+        for (int pass = 0; pass < 3; ++pass) {
+            zFwd[0] = std::max(zMin[0], zSmooth[0]);
+            for (size_t i = 1; i < n; ++i) {
+                zFwd[i] = std::max(zMin[i], alphaZoom * zFwd[i - 1] + (1.0 - alphaZoom) * zSmooth[i]);
+            }
+            zBwd[n - 1] = std::max(zMin[n - 1], zFwd[n - 1]);
+            for (size_t i = n - 1; i > 0; --i) {
+                const size_t idx = i - 1;
+                zBwd[idx] = std::max(zMin[idx], alphaZoom * zBwd[idx + 1] + (1.0 - alphaZoom) * zFwd[idx]);
+            }
+            zSmooth = zBwd;
         }
     } else {
         double staticMax = 1.0;
@@ -265,7 +270,7 @@ WarpComputationResult FrameWarpCalculator::computeAllFramesWithRollingShutter(
     res.maxZoom = 0.0;
     double sumZoom = 0.0;
 
-    const bool useRS = rollingShutterCorrection && (profile.readoutTimeSec > 1e-5) && (traj.frameTimestampsSec.size() == n);
+    const bool useRS = rollingShutterCorrection && (std::fabs(profile.readoutTimeSec) > 1e-5) && (traj.frameTimestampsSec.size() == n);
 
     for (size_t i = 0; i < n; ++i) {
         double zFinal = zSmooth[i];

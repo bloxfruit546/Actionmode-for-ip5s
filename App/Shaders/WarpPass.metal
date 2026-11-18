@@ -8,7 +8,7 @@ struct RowSlice {
 };
 
 struct WarpFrameUniforms {
-    RowSlice slices[16];
+    RowSlice slices[32];
     uint2 outSize;
     uint2 inSize;
     uint2 lumaOutSize;
@@ -56,8 +56,8 @@ inline float2 solveRollingShutterAndDistort(
 
     // 3-iteration fixed-point solver for per-row rolling shutter convergence (< 0.01 px)
     for (int iter = 0; iter < 3; ++iter) {
-        const float fIdx = clamp(rowNorm * 15.0f, 0.0f, 15.0f);
-        const int i0 = min(int(floor(fIdx)), 14);
+        const float fIdx = clamp(rowNorm * 31.0f, 0.0f, 31.0f);
+        const int i0 = min(int(floor(fIdx)), 30);
         const float t = fIdx - float(i0);
 
         const float3 r0 = mix(u.slices[i0].hRow0.xyz, u.slices[i0 + 1].hRow0.xyz, t);
@@ -103,8 +103,11 @@ kernel void lanczos4_warp_luma(
     const float fy = src.y - float(iy);
 
     float wx[8];
+    float wy[8];
     for (int k = 0; k < 8; ++k) {
-        wx[k] = lanczos4_weight(fx - float(k - 3));
+        const float offset = float(k - 3);
+        wx[k] = lanczos4_weight(fx - offset);
+        wy[k] = lanczos4_weight(fy - offset);
     }
 
     const int maxX = int(u.inSize.x) - 1;
@@ -113,10 +116,10 @@ kernel void lanczos4_warp_luma(
     float sum = 0.0f;
     float wSum = 0.0f;
     for (int dy = -3; dy <= 4; ++dy) {
-        const float wy = lanczos4_weight(fy - float(dy));
+        const float wRow = wy[dy + 3];
         const int py = clamp(iy + dy, 0, maxY);
         for (int dx = -3; dx <= 4; ++dx) {
-            const float weight = wx[dx + 3] * wy;
+            const float weight = wx[dx + 3] * wRow;
             const int px = clamp(ix + dx, 0, maxX);
             sum += inTex.read(uint2(px, py)).r * weight;
             wSum += weight;

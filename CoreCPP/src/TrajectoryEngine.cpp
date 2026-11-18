@@ -52,7 +52,6 @@ Quat quatExp(const Vec3& r) {
 }
 
 Quat quatFromBasis(const Vec3& right, const Vec3& down, const Vec3& forward) {
-    // Columns of R_WC: [right, down, forward]
     const double m00 = right.x, m01 = down.x, m02 = forward.x;
     const double m10 = right.y, m11 = down.y, m12 = forward.y;
     const double m20 = right.z, m21 = down.z, m22 = forward.z;
@@ -113,15 +112,15 @@ double computeAngularAccelRms(const std::vector<Quat>& quats, double dt) {
     return (count > 0) ? std::sqrt(sumSq / static_cast<double>(count)) : 0.0;
 }
 
-double computeAlphaForAxis(double smoothness, double smoothOmega, double velocityDamping, double dtF) {
+double computeAlphaForAxis(double smoothness, double panActivity, double velocityDamping, double dtF) {
     const double s = std::min(1.0, std::max(0.0, smoothness));
     if (s <= 1e-4) {
         return 0.0;
     }
-    // At smoothness = 0.65, tauBase ~= 0.85s for stronger gimbal stabilization
-    const double tauBase = 0.02 + s * 1.28;
-    const double ratio = smoothOmega / 0.55;
-    const double tauEff = tauBase / (1.0 + velocityDamping * ratio * ratio);
+    // Cinema-grade tauBase: ~1.28s at s=0.65, ~2.53s at s=0.85, 4.00s at s=1.0
+    const double tauBase = 0.02 + 0.90 * s + 3.08 * std::pow(s, 3.5);
+    // Only reduce tau during genuine intentional panning (panActivity > 0)
+    const double tauEff = tauBase / (1.0 + velocityDamping * panActivity * 4.0);
     return std::exp(-dtF / std::max(tauEff, 1e-4));
 }
 
@@ -135,7 +134,6 @@ double computeRollErrorDeg(const Quat& qWC, const Vec3& gWorld, int quadrantDegr
     const Vec3 downW = qWC.rotateVector(screenDownCam).normalized();
     const Vec3 forwardW = qWC.rotateVector(Vec3(0.0, 0.0, 1.0)).normalized();
 
-    // Project gravity onto image plane perpendicular to forwardW
     Vec3 gProj = gWorld - forwardW * gWorld.dot(forwardW);
     if (gProj.normSquared() < 1e-6) {
         return 0.0;
@@ -190,66 +188,138 @@ void TrajectoryEngine::setImuData(
         return a.timestamp_sec < b.timestamp_sec;
     });
 
-    // Initialize world gravity from first 0.5s of accelerometer data (transformed by same AxisPreset!)
-    initGravityCam_ = Vec3(0.0, 1.0, 0.0);
-    if (!sortedAccel.empty()) {
-        const double t0 = sortedAccel.front().timestamp_sec;
-        Vec3 sumA(0.0, 0.0, 0.0);
-        int initCount = 0;
-        for (const auto& a : sortedAccel) {
-            if (a.timestamp_sec > t0 + 0.5 && initCount >= 10) {
-                break;
-            }
-            sumA = sumA + applyAxisMatrix(M, Vec3(a.ax, a.ay, a.az));
-            ++initCount;
-        }
-        if (sumA.normSquared() > 1e-6) {
-            initGravityCam_ = sumA.normalized();
+    const Vec3 biasIos(header.gyro_bias_x, header.gyro_bias_y, header.gyro_bias_z);
+
+    // Pass 1: Pure RK4 Gyro integration (immune to linear shake acceleration)
+    const size_t nGyro = dedupGyro.size();
+    std::vector<Quat> qPureGyro(nGyro, Quat::identity());
+    std::vector<Vec3> omegaCamArr(nGyro);
+
+    for (size_t i = 0; i < nGyro; ++i) {
+        const auto& g = dedupGyro[i];
+        const Vec3 rawOmegaIos(g.gx - biasIos.x, g.gy - biasIos.y, g.gz - biasIos.z);
+        omegaCamArr[i] = applyAxisMatrix(M, rawOmegaIos);
+        if (i > 0) {
+            const double dt = std::min(0.1, std::max(1e-6, g.timestamp_sec - dedupGyro[i - 1].timestamp_sec));
+            qPureGyro[i] = Quat::integrateGyroStep(qPureGyro[i - 1], omegaCamArr[i], dt);
         }
     }
 
-    const Vec3 biasIos(header.gyro_bias_x, header.gyro_bias_y, header.gyro_bias_z);
-    const double kpMahony = 0.5;
+    // Pass 2: Zero-Phase VQF-Style Offline Gravity Estimator (tau_g = 3.0s)
+    // Transforms each accelerometer sample into inertial frame via qPureGyro, weights by |norm-1| & jerk,
+    // and runs forward-backward zero-phase weighted LPF so lateral shakes produce ZERO horizon sway.
+    initGravityCam_ = Vec3(0.0, 1.0, 0.0);
+    std::vector<Vec3> gWorldPerGyro(nGyro, initGravityCam_);
 
-    integratedSamples_.reserve(dedupGyro.size());
-    Quat q = Quat::identity();
-    size_t accelIdx = 0;
+    if (!sortedAccel.empty()) {
+        const size_t nAcc = sortedAccel.size();
+        std::vector<Vec3> gInertialMeas(nAcc);
+        std::vector<double> accWeight(nAcc, 0.001);
+        size_t gIdx = 0;
 
-    for (size_t i = 0; i < dedupGyro.size(); ++i) {
-        const auto& g = dedupGyro[i];
-        const Vec3 rawOmegaIos(g.gx - biasIos.x, g.gy - biasIos.y, g.gz - biasIos.z);
-        Vec3 omegaCam = applyAxisMatrix(M, rawOmegaIos);
+        for (size_t k = 0; k < nAcc; ++k) {
+            const auto& a = sortedAccel[k];
+            while (gIdx + 1 < nGyro &&
+                   std::fabs(dedupGyro[gIdx + 1].timestamp_sec - a.timestamp_sec) <=
+                   std::fabs(dedupGyro[gIdx].timestamp_sec - a.timestamp_sec)) {
+                ++gIdx;
+            }
+            const Vec3 aCam = applyAxisMatrix(M, Vec3(a.ax, a.ay, a.az));
+            const double aNorm = aCam.norm();
 
-        if (i > 0) {
-            const double dt = std::min(0.1, std::max(1e-6, g.timestamp_sec - dedupGyro[i - 1].timestamp_sec));
-
-            Vec3 feedback(0.0, 0.0, 0.0);
-            if (!sortedAccel.empty()) {
-                while (accelIdx + 1 < sortedAccel.size() &&
-                       std::fabs(sortedAccel[accelIdx + 1].timestamp_sec - g.timestamp_sec) <=
-                       std::fabs(sortedAccel[accelIdx].timestamp_sec - g.timestamp_sec)) {
-                    ++accelIdx;
-                }
-                const auto& a = sortedAccel[accelIdx];
-                if (std::fabs(a.timestamp_sec - g.timestamp_sec) < 0.05) {
-                    const Vec3 aCam = applyAxisMatrix(M, Vec3(a.ax, a.ay, a.az));
-                    const double aNorm = aCam.norm();
-                    if (aNorm >= 0.88 && aNorm <= 1.12) {
-                        const Vec3 aMeas = aCam * (1.0 / aNorm);
-                        const Vec3 gEst = q.conjugate().rotateVector(initGravityCam_);
-                        feedback = aMeas.cross(gEst) * kpMahony;
-
-                        // Adaptive low-pass gravity tracker in world coordinates
-                        const Vec3 aWorld = q.rotateVector(aMeas);
-                        initGravityCam_ = (initGravityCam_ * 0.995 + aWorld * 0.005).normalized();
-                    }
-                }
+            double jerk = 0.0;
+            if (k > 0) {
+                const double dtA = std::max(1e-4, a.timestamp_sec - sortedAccel[k - 1].timestamp_sec);
+                const Vec3 prevCam = applyAxisMatrix(M, Vec3(sortedAccel[k - 1].ax, sortedAccel[k - 1].ay, sortedAccel[k - 1].az));
+                jerk = (aCam - prevCam).norm() / dtA;
             }
 
-            q = Quat::integrateGyroStep(q, omegaCam + feedback, dt);
+            const double magDev = std::fabs(aNorm - 1.0);
+            double w = 0.001;
+            if (magDev <= 0.08 && jerk <= 4.0) {
+                const double wMag = (magDev <= 0.03) ? 1.0 : (1.0 - (magDev - 0.03) / 0.05);
+                const double wJerk = (jerk <= 1.5) ? 1.0 : (1.0 - (jerk - 1.5) / 2.5);
+                w = std::max(0.001, wMag * wJerk);
+            }
+            accWeight[k] = w;
+            gInertialMeas[k] = (aNorm > 1e-4) ? qPureGyro[gIdx].rotateVector(aCam * (1.0 / aNorm)) : Vec3(0.0, 1.0, 0.0);
         }
 
-        integratedSamples_.push_back({g.timestamp_sec, q, omegaCam});
+        // Weighted initial estimate
+        Vec3 gMean(0.0, 0.0, 0.0);
+        double wSum = 0.0;
+        for (size_t k = 0; k < nAcc; ++k) {
+            gMean = gMean + gInertialMeas[k] * accWeight[k];
+            wSum += accWeight[k];
+        }
+        if (gMean.normSquared() > 1e-6 && wSum > 0.0) {
+            initGravityCam_ = gMean.normalized();
+        } else {
+            // Fallback: unweighted average of first 0.5s
+            const double t0 = sortedAccel.front().timestamp_sec;
+            Vec3 sumA(0.0, 0.0, 0.0);
+            for (const auto& a : sortedAccel) {
+                if (a.timestamp_sec > t0 + 0.5) break;
+                sumA = sumA + applyAxisMatrix(M, Vec3(a.ax, a.ay, a.az));
+            }
+            if (sumA.normSquared() > 1e-6) {
+                initGravityCam_ = sumA.normalized();
+            }
+        }
+
+        // Forward-Backward Zero-Phase Weighted LPF (tau_g = 3.0s)
+        const double tauG = 3.0;
+        std::vector<Vec3> gFwd(nAcc, initGravityCam_);
+        gFwd[0] = (gInertialMeas[0] * accWeight[0] + initGravityCam_ * (1.0 - accWeight[0])).normalized();
+        for (size_t k = 1; k < nAcc; ++k) {
+            const double dtA = std::min(0.1, std::max(1e-4, sortedAccel[k].timestamp_sec - sortedAccel[k - 1].timestamp_sec));
+            const double effAlpha = std::exp(-dtA * accWeight[k] / tauG);
+            gFwd[k] = (gFwd[k - 1] * effAlpha + gInertialMeas[k] * (1.0 - effAlpha)).normalized();
+        }
+
+        std::vector<Vec3> gSmooth = gFwd;
+        for (size_t k = nAcc - 1; k > 0; --k) {
+            const size_t idx = k - 1;
+            const double dtA = std::min(0.1, std::max(1e-4, sortedAccel[k].timestamp_sec - sortedAccel[idx].timestamp_sec));
+            const double effAlpha = std::exp(-dtA * accWeight[idx] / tauG);
+            gSmooth[idx] = (gSmooth[idx + 1] * effAlpha + gFwd[idx] * (1.0 - effAlpha)).normalized();
+        }
+
+        initGravityCam_ = gSmooth[0];
+
+        // Map smoothed gravity back to gyro timeline + apply gentle drift correction using clean samples
+        size_t aIdx = 0;
+        integratedSamples_.reserve(nGyro);
+        Quat q = Quat::identity();
+        const double kpMahony = 0.35;
+
+        for (size_t i = 0; i < nGyro; ++i) {
+            const double tG = dedupGyro[i].timestamp_sec;
+            while (aIdx + 1 < nAcc &&
+                   std::fabs(sortedAccel[aIdx + 1].timestamp_sec - tG) <=
+                   std::fabs(sortedAccel[aIdx].timestamp_sec - tG)) {
+                ++aIdx;
+            }
+            gWorldPerGyro[i] = gSmooth[aIdx];
+
+            if (i > 0) {
+                const double dt = std::min(0.1, std::max(1e-6, tG - dedupGyro[i - 1].timestamp_sec));
+                Vec3 feedback(0.0, 0.0, 0.0);
+                if (accWeight[aIdx] > 0.2 && std::fabs(sortedAccel[aIdx].timestamp_sec - tG) < 0.05) {
+                    const Vec3 aCam = applyAxisMatrix(M, Vec3(sortedAccel[aIdx].ax, sortedAccel[aIdx].ay, sortedAccel[aIdx].az)).normalized();
+                    const Vec3 gEst = q.conjugate().rotateVector(gSmooth[aIdx]);
+                    feedback = aCam.cross(gEst) * (kpMahony * accWeight[aIdx]);
+                }
+                q = Quat::integrateGyroStep(q, omegaCamArr[i] + feedback, dt);
+            }
+            integratedSamples_.push_back({tG, q, omegaCamArr[i], gSmooth[aIdx]});
+        }
+        return;
+    }
+
+    integratedSamples_.reserve(nGyro);
+    for (size_t i = 0; i < nGyro; ++i) {
+        integratedSamples_.push_back({dedupGyro[i].timestamp_sec, qPureGyro[i], omegaCamArr[i], initGravityCam_});
     }
 }
 
@@ -298,6 +368,28 @@ Quat TrajectoryEngine::sampleRawQuaternionAt(double timestampSec) const {
     return slerpShortest(s0.quat, s1.quat, t);
 }
 
+Vec3 TrajectoryEngine::sampleGravityWorldAt(double timestampSec) const {
+    if (integratedSamples_.empty()) {
+        return initGravityCam_;
+    }
+    if (timestampSec <= integratedSamples_.front().timestampSec) {
+        return integratedSamples_.front().gravityWorld;
+    }
+    if (timestampSec >= integratedSamples_.back().timestampSec) {
+        return integratedSamples_.back().gravityWorld;
+    }
+    auto it = std::lower_bound(
+        integratedSamples_.begin(),
+        integratedSamples_.end(),
+        timestampSec,
+        [](const ImuSample& s, double t) { return s.timestampSec < t; }
+    );
+    if (it == integratedSamples_.begin()) {
+        return it->gravityWorld;
+    }
+    return it->gravityWorld;
+}
+
 TrajectoryResult TrajectoryEngine::solve(
     const std::vector<GFFrameRecord>& frames,
     const StabilizerConfig& config
@@ -312,11 +404,13 @@ TrajectoryResult TrajectoryEngine::solve(
     result.smoothFrameQuats.resize(n, Quat::identity());
     result.frameTimestampsSec.resize(n, 0.0);
 
+    std::vector<Vec3> frameGravityW(n, initGravityCam_);
     const double offsetSec = config.timeOffsetMs * 0.001;
     for (size_t i = 0; i < n; ++i) {
         const double tMid = frames[i].pts_sec - 0.5 * static_cast<double>(frames[i].exposure_duration_sec) + offsetSec;
         result.frameTimestampsSec[i] = tMid;
         result.rawFrameQuats[i] = sampleRawQuaternionAt(tMid);
+        frameGravityW[i] = sampleGravityWorldAt(tMid);
     }
 
     if (n < 3) {
@@ -326,17 +420,35 @@ TrajectoryResult TrajectoryEngine::solve(
     }
 
     const double dtF = 1.0 / nominalFps_;
-    // Net rotational speed over ~0.3s window: intentional pans add up, while back-and-forth jitter cancels out!
-    const int radius = std::max(1, static_cast<int>(std::round(0.15 * nominalFps_)));
-    std::vector<double> smoothOmega(n, 0.0);
+
+    // True Net-Displacement Pan Detector over +-0.45s window:
+    // panRatio = D_i / (L_i + 1e-4). Only damp tau when panRatio > 0.65 AND D_i > 12 deg.
+    const int radius = std::max(2, static_cast<int>(std::round(0.45 * nominalFps_)));
+    std::vector<double> stepAngles(n, 0.0);
+    for (size_t i = 1; i < n; ++i) {
+        stepAngles[i] = rotationAngleBetween(result.rawFrameQuats[i - 1], result.rawFrameQuats[i]);
+    }
+
+    std::vector<double> panActivity(n, 0.0);
+    double panRatioSum = 0.0;
+    const double minNetDispRad = 12.0 * (kPi / 180.0);
+
     for (size_t i = 0; i < n; ++i) {
         const size_t lo = static_cast<size_t>(std::max(0, static_cast<int>(i) - radius));
         const size_t hi = static_cast<size_t>(std::min(static_cast<int>(n) - 1, static_cast<int>(i) + radius));
-        if (hi > lo) {
-            const double netAngle = rotationAngleBetween(result.rawFrameQuats[lo], result.rawFrameQuats[hi]);
-            smoothOmega[i] = netAngle / (static_cast<double>(hi - lo) * dtF);
+        double pathLen = 0.0;
+        for (size_t k = lo + 1; k <= hi; ++k) {
+            pathLen += stepAngles[k];
+        }
+        const double netDisp = rotationAngleBetween(result.rawFrameQuats[lo], result.rawFrameQuats[hi]);
+        const double ratio = netDisp / (pathLen + 1e-4);
+        panRatioSum += ratio;
+
+        if (ratio > 0.65 && netDisp > minNetDispRad) {
+            panActivity[i] = std::min(1.0, (ratio - 0.65) / 0.35);
         }
     }
+    result.avgPanRatio = panRatioSum / static_cast<double>(n);
 
     const double pSmooth = config.pitchSmoothness;
     const double ySmooth = config.yawSmoothness;
@@ -345,44 +457,52 @@ TrajectoryResult TrajectoryEngine::solve(
     if (pSmooth <= 1e-4 && ySmooth <= 1e-4 && rSmooth <= 1e-4 && !config.horizonLockEnabled) {
         result.smoothFrameQuats = result.rawFrameQuats;
     } else {
+        // 3-Pass Forward-Backward Zero-Phase Smoother (Gaussian-like C^3 smoothness)
+        std::vector<Quat> current = result.rawFrameQuats;
         std::vector<Quat> qFwd(n);
-        qFwd[0] = result.rawFrameQuats[0];
-        for (size_t i = 1; i < n; ++i) {
-            const double aPitch = computeAlphaForAxis(pSmooth, smoothOmega[i], config.velocityDamping, dtF);
-            const double aYaw = computeAlphaForAxis(ySmooth, smoothOmega[i], config.velocityDamping, dtF);
-            const double aRoll = computeAlphaForAxis(rSmooth, smoothOmega[i], config.velocityDamping, dtF);
+        std::vector<Quat> qBwd(n);
 
-            const Vec3 rDiff = quatLog(qFwd[i - 1].conjugate() * result.rawFrameQuats[i]);
-            const Vec3 rStep(
-                rDiff.x * (1.0 - aPitch),
-                rDiff.y * (1.0 - aYaw),
-                rDiff.z * (1.0 - aRoll)
-            );
-            qFwd[i] = (qFwd[i - 1] * quatExp(rStep)).normalized();
+        for (int pass = 0; pass < 3; ++pass) {
+            qFwd[0] = current[0];
+            for (size_t i = 1; i < n; ++i) {
+                const double aPitch = computeAlphaForAxis(pSmooth, panActivity[i], config.velocityDamping, dtF);
+                const double aYaw = computeAlphaForAxis(ySmooth, panActivity[i], config.velocityDamping, dtF);
+                const double aRoll = computeAlphaForAxis(rSmooth, panActivity[i], config.velocityDamping, dtF);
+
+                const Vec3 rDiff = quatLog(qFwd[i - 1].conjugate() * current[i]);
+                const Vec3 rStep(
+                    rDiff.x * (1.0 - aPitch),
+                    rDiff.y * (1.0 - aYaw),
+                    rDiff.z * (1.0 - aRoll)
+                );
+                qFwd[i] = (qFwd[i - 1] * quatExp(rStep)).normalized();
+            }
+
+            qBwd[n - 1] = qFwd[n - 1];
+            for (size_t i = n - 1; i > 0; --i) {
+                const size_t idx = i - 1;
+                const double aPitch = computeAlphaForAxis(pSmooth, panActivity[idx], config.velocityDamping, dtF);
+                const double aYaw = computeAlphaForAxis(ySmooth, panActivity[idx], config.velocityDamping, dtF);
+                const double aRoll = computeAlphaForAxis(rSmooth, panActivity[idx], config.velocityDamping, dtF);
+
+                const Vec3 rDiff = quatLog(qBwd[idx + 1].conjugate() * qFwd[idx]);
+                const Vec3 rStep(
+                    rDiff.x * (1.0 - aPitch),
+                    rDiff.y * (1.0 - aYaw),
+                    rDiff.z * (1.0 - aRoll)
+                );
+                qBwd[idx] = (qBwd[idx + 1] * quatExp(rStep)).normalized();
+            }
+
+            current = std::move(qBwd);
+            qBwd.resize(n);
         }
 
-        result.smoothFrameQuats[n - 1] = qFwd[n - 1];
-        for (size_t i = n - 1; i > 0; --i) {
-            const size_t idx = i - 1;
-            const double aPitch = computeAlphaForAxis(pSmooth, smoothOmega[idx], config.velocityDamping, dtF);
-            const double aYaw = computeAlphaForAxis(ySmooth, smoothOmega[idx], config.velocityDamping, dtF);
-            const double aRoll = computeAlphaForAxis(rSmooth, smoothOmega[idx], config.velocityDamping, dtF);
-
-            const Vec3 rDiff = quatLog(result.smoothFrameQuats[idx + 1].conjugate() * qFwd[idx]);
-            const Vec3 rStep(
-                rDiff.x * (1.0 - aPitch),
-                rDiff.y * (1.0 - aYaw),
-                rDiff.z * (1.0 - aRoll)
-            );
-            result.smoothFrameQuats[idx] = (result.smoothFrameQuats[idx + 1] * quatExp(rStep)).normalized();
-        }
+        result.smoothFrameQuats = std::move(current);
     }
 
-    // 360-degree Gimbal-free Horizon Lock via Gram-Schmidt orthogonalization around gravity.
-    // Auto-snap to nearest 90-degree quadrant of measured gravity so Portrait/Landscape holds
-    // never suffer a spurious 90-degree/110-degree roll offset when preferredTransform is 0.
-    const Vec3 gWorld = initGravityCam_.normalized();
-    const int horizonQuadrantDeg = detectGravityQuadrantDeg(gWorld);
+    // 360-degree Gimbal-free Horizon Lock using Zero-Phase Gravity Vector
+    const int horizonQuadrantDeg = detectGravityQuadrantDeg(frameGravityW[0]);
     result.detectedGravityQuadrantDeg = horizonQuadrantDeg;
 
     if (config.horizonLockEnabled && config.horizonLockAmount > 1e-4) {
@@ -392,8 +512,9 @@ TrajectoryResult TrajectoryEngine::solve(
         const Quat screenAlignQ = Quat::fromAxisAngle(Vec3(0.0, 0.0, 1.0), displayRotRad + tiltRad);
 
         for (size_t i = 0; i < n; ++i) {
+            const Vec3 gW = frameGravityW[i].normalized();
             const Vec3 zc = result.smoothFrameQuats[i].rotateVector(Vec3(0.0, 0.0, 1.0)).normalized();
-            Vec3 yc = gWorld - zc * gWorld.dot(zc);
+            Vec3 yc = gW - zc * gW.dot(zc);
             if (yc.normSquared() < 1e-6) {
                 yc = result.smoothFrameQuats[i].rotateVector(Vec3(0.0, 1.0, 0.0));
             }
@@ -413,13 +534,12 @@ TrajectoryResult TrajectoryEngine::solve(
         result.stabilityImprovementPct = std::min(99.5, std::max(0.0, (1.0 - rmsRatio) * 100.0));
     }
 
-    // Diagnostic angular metrics for UI verification
     double maxInRoll = 0.0;
     double maxOutRoll = 0.0;
     double maxCorr = 0.0;
     for (size_t i = 0; i < n; ++i) {
-        maxInRoll = std::max(maxInRoll, std::fabs(computeRollErrorDeg(result.rawFrameQuats[i], gWorld, horizonQuadrantDeg)));
-        maxOutRoll = std::max(maxOutRoll, std::fabs(computeRollErrorDeg(result.smoothFrameQuats[i], gWorld, horizonQuadrantDeg)));
+        maxInRoll = std::max(maxInRoll, std::fabs(computeRollErrorDeg(result.rawFrameQuats[i], frameGravityW[i], horizonQuadrantDeg)));
+        maxOutRoll = std::max(maxOutRoll, std::fabs(computeRollErrorDeg(result.smoothFrameQuats[i], frameGravityW[i], horizonQuadrantDeg)));
         const double corrDeg = rotationAngleBetween(result.rawFrameQuats[i], result.smoothFrameQuats[i]) * (180.0 / kPi);
         maxCorr = std::max(maxCorr, corrDeg);
     }

@@ -9,7 +9,7 @@
 
 namespace gf {
 
-static constexpr int kRollingShutterSlices = 16;
+static constexpr int kRollingShutterSlices = 32;
 
 struct GFWarpMatrixPacket {
     float m[9]; // Center-row 3x3 inverse homography H_inv

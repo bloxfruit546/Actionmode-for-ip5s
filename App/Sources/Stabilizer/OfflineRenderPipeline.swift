@@ -16,6 +16,8 @@ struct StabilizeExportConfig {
     let rollingShutterCorrection: Bool
     let dynamicZoomEnabled: Bool
     let axisPresetIndex: Int
+    let hasReadoutOverride: Bool
+    let signedReadoutTimeMs: Double
 }
 
 struct StabilizeExportResult {
@@ -544,7 +546,9 @@ final class OfflineRenderPipeline {
             rollingShutterCorrection: config.rollingShutterCorrection,
             dynamicZoomEnabled: config.dynamicZoomEnabled,
             axisPresetIndex: config.axisPresetIndex,
-            videoRotationDegrees: videoRotationDegrees
+            videoRotationDegrees: videoRotationDegrees,
+            hasReadoutOverride: config.hasReadoutOverride,
+            signedReadoutTimeMs: config.signedReadoutTimeMs
         )
     }
 
