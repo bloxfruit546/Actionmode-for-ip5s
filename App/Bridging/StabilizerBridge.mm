@@ -255,10 +255,11 @@ struct GFWarpFrameUniformsMetal {
     _plan.maxInputRollDeg = traj.maxInputRollDeg;
     _plan.maxOutputRollErrorDeg = traj.maxOutputRollErrorDeg;
     _plan.maxCorrectionDeg = traj.maxCorrectionDeg;
-    if (videoRotationDegrees == 90 || videoRotationDegrees == 270) {
-        _plan.detectedOrientationName = [NSString stringWithFormat:@"Portrait (%ld°)", (long)videoRotationDegrees];
+    const int quadDeg = traj.detectedGravityQuadrantDeg;
+    if (quadDeg == 90 || quadDeg == 270) {
+        _plan.detectedOrientationName = [NSString stringWithFormat:@"Auto-Portrait (%d°)", quadDeg];
     } else {
-        _plan.detectedOrientationName = [NSString stringWithFormat:@"Landscape (%ld°)", (long)videoRotationDegrees];
+        _plan.detectedOrientationName = [NSString stringWithFormat:@"Auto-Landscape (%d°)", quadDeg];
     }
     if (!_frameLUTs.empty()) {
         const size_t midIdx = _frameLUTs.size() / 2;

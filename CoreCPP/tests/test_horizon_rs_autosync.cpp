@@ -473,10 +473,11 @@ void testEndToEndPixelPortrait90HorizonLock35Deg() {
     cfg.rollSmoothness = 0.5;
     cfg.horizonLockEnabled = true;
     cfg.horizonLockAmount = 1.0;
-    cfg.videoRotationDegrees = 90;
+    cfg.videoRotationDegrees = 0; // Simulate .mov with preferredTransform=0 while held Portrait!
 
     const auto traj = engine.solve(frames, cfg);
     assert(traj.valid);
+    assert(traj.detectedGravityQuadrantDeg == 90);
     assert(traj.maxOutputRollErrorDeg < 0.5);
 
     gf::CalibrationProfile prof;

@@ -125,8 +125,8 @@ double computeAlphaForAxis(double smoothness, double smoothOmega, double velocit
     return std::exp(-dtF / std::max(tauEff, 1e-4));
 }
 
-double computeRollErrorDeg(const Quat& qWC, const Vec3& gWorld, int videoRotationDegrees) {
-    const double rotRad = static_cast<double>(videoRotationDegrees) * (kPi / 180.0);
+double computeRollErrorDeg(const Quat& qWC, const Vec3& gWorld, int quadrantDegrees) {
+    const double rotRad = static_cast<double>(quadrantDegrees) * (kPi / 180.0);
     const Quat rotQ = Quat::fromAxisAngle(Vec3(0.0, 0.0, 1.0), -rotRad);
     const Vec3 screenRightCam = rotQ.rotateVector(Vec3(1.0, 0.0, 0.0));
     const Vec3 screenDownCam = rotQ.rotateVector(Vec3(0.0, 1.0, 0.0));
@@ -145,6 +145,13 @@ double computeRollErrorDeg(const Quat& qWC, const Vec3& gWorld, int videoRotatio
     const double sinRoll = gProj.dot(rightW);
     const double cosRoll = gProj.dot(downW);
     return std::atan2(sinRoll, cosRoll) * (180.0 / kPi);
+}
+
+int detectGravityQuadrantDeg(const Vec3& gWorld) {
+    if (std::fabs(gWorld.y) >= std::fabs(gWorld.x)) {
+        return (gWorld.y >= 0.0) ? 0 : 180;
+    }
+    return (gWorld.x >= 0.0) ? 90 : 270;
 }
 
 } // namespace
@@ -371,11 +378,16 @@ TrajectoryResult TrajectoryEngine::solve(
         }
     }
 
-    // 360-degree Gimbal-free Horizon Lock via Gram-Schmidt orthogonalization around gravity
+    // 360-degree Gimbal-free Horizon Lock via Gram-Schmidt orthogonalization around gravity.
+    // Auto-snap to nearest 90-degree quadrant of measured gravity so Portrait/Landscape holds
+    // never suffer a spurious 90-degree/110-degree roll offset when preferredTransform is 0.
     const Vec3 gWorld = initGravityCam_.normalized();
+    const int horizonQuadrantDeg = detectGravityQuadrantDeg(gWorld);
+    result.detectedGravityQuadrantDeg = horizonQuadrantDeg;
+
     if (config.horizonLockEnabled && config.horizonLockAmount > 1e-4) {
         const double amount = std::min(1.0, std::max(0.0, config.horizonLockAmount));
-        const double displayRotRad = static_cast<double>(config.videoRotationDegrees) * (kPi / 180.0);
+        const double displayRotRad = static_cast<double>(horizonQuadrantDeg) * (kPi / 180.0);
         const double tiltRad = config.horizonTiltOffsetDeg * (kPi / 180.0);
         const Quat screenAlignQ = Quat::fromAxisAngle(Vec3(0.0, 0.0, 1.0), displayRotRad + tiltRad);
 
@@ -406,8 +418,8 @@ TrajectoryResult TrajectoryEngine::solve(
     double maxOutRoll = 0.0;
     double maxCorr = 0.0;
     for (size_t i = 0; i < n; ++i) {
-        maxInRoll = std::max(maxInRoll, std::fabs(computeRollErrorDeg(result.rawFrameQuats[i], gWorld, config.videoRotationDegrees)));
-        maxOutRoll = std::max(maxOutRoll, std::fabs(computeRollErrorDeg(result.smoothFrameQuats[i], gWorld, config.videoRotationDegrees)));
+        maxInRoll = std::max(maxInRoll, std::fabs(computeRollErrorDeg(result.rawFrameQuats[i], gWorld, horizonQuadrantDeg)));
+        maxOutRoll = std::max(maxOutRoll, std::fabs(computeRollErrorDeg(result.smoothFrameQuats[i], gWorld, horizonQuadrantDeg)));
         const double corrDeg = rotationAngleBetween(result.rawFrameQuats[i], result.smoothFrameQuats[i]) * (180.0 / kPi);
         maxCorr = std::max(maxCorr, corrDeg);
     }

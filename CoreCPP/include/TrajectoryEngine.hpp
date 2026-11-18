@@ -36,6 +36,7 @@ struct TrajectoryResult {
     double maxInputRollDeg = 0.0;
     double maxOutputRollErrorDeg = 0.0;
     double maxCorrectionDeg = 0.0;
+    int detectedGravityQuadrantDeg = 0;
     bool valid = false;
 };
 

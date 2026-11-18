@@ -200,12 +200,12 @@ final class StabilizeViewController: UIViewController {
         configureSlider(pitchSlider, min: 0.0, max: 1.0, val: 0.65)
         configureSlider(yawSlider, min: 0.0, max: 1.0, val: 0.65)
         configureSlider(rollSlider, min: 0.0, max: 1.0, val: 0.75)
-        configureSlider(zoomSlider, min: 1.05, max: 1.65, val: 1.35)
+        configureSlider(zoomSlider, min: 1.05, max: 2.20, val: 1.65)
         configureSlider(tiltSlider, min: -15.0, max: 15.0, val: 0.0)
         configureSlider(offsetSlider, min: -80.0, max: 80.0, val: 0.0)
 
         unlimitedZoomSwitch.translatesAutoresizingMaskIntoConstraints = false
-        unlimitedZoomSwitch.isOn = false
+        unlimitedZoomSwitch.isOn = true
         unlimitedZoomSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
 
         dynamicZoomSwitch.translatesAutoresizingMaskIntoConstraints = false
@@ -358,8 +358,8 @@ final class StabilizeViewController: UIViewController {
     }
 
     @objc private func handleHorizonToggled() {
-        if horizonSwitch.isOn && zoomSlider.value < 1.50 {
-            zoomSlider.value = 1.60
+        if horizonSwitch.isOn && zoomSlider.value < 1.65 {
+            zoomSlider.value = 1.65
         }
         updateSliderLabels()
         handlePreview()
