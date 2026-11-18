@@ -116,6 +116,8 @@ struct GFWarpFrameUniformsMetal {
     out.axisPresetName = [NSString stringWithUTF8String:res.axisPresetName.c_str()] ?: @"";
     out.signedReadoutTimeMs = res.signedReadoutTimeMs;
     out.hasReadoutEstimate = res.hasReadoutEstimate ? YES : NO;
+    out.effectiveFocalScale = res.effectiveFocalScale;
+    out.hasFocalScaleEstimate = res.hasFocalScaleEstimate ? YES : NO;
     out.diagnosticMessage = [NSString stringWithUTF8String:res.diagnosticMessage.c_str()] ?: @"";
     return out;
 }
@@ -171,7 +173,8 @@ struct GFWarpFrameUniformsMetal {
                              axisPresetIndex:(NSInteger)axisPresetIndex
                         videoRotationDegrees:(NSInteger)videoRotationDegrees
                        hasReadoutOverride:(BOOL)hasReadoutOverride
-                      signedReadoutTimeMs:(double)signedReadoutTimeMs {
+                      signedReadoutTimeMs:(double)signedReadoutTimeMs
+                       focalScaleOverride:(double)focalScaleOverride {
     self = [super init];
     if (!self) {
         return nil;
@@ -245,6 +248,10 @@ struct GFWarpFrameUniformsMetal {
     }
     if (hasReadoutOverride) {
         _profile.readoutTimeSec = signedReadoutTimeMs * 0.001;
+    }
+    if (focalScaleOverride >= 0.85 && focalScaleOverride <= 1.20) {
+        _profile.fx *= focalScaleOverride;
+        _profile.fy *= focalScaleOverride;
     }
 
     const double fps = (hdr.nominal_fps > 1.0) ? hdr.nominal_fps : 30.0;

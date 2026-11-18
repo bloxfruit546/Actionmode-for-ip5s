@@ -1,7 +1,9 @@
+import AVFoundation
 import UIKit
 
-final class TakesListViewController: UITableViewController {
+final class TakesListViewController: UITableViewController, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
     private var takes: [CaptureTake] = []
+    private var importAlert: UIAlertController?
 
     private let dateFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -12,9 +14,83 @@ final class TakesListViewController: UITableViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         navigationItem.title = "Takes"
+        navigationItem.rightBarButtonItem = UIBarButtonItem(
+            title: "+ Photos",
+            style: .plain,
+            target: self,
+            action: #selector(handleImportFromPhotos)
+        )
         tableView.backgroundColor = UIColor(red: 0.09, green: 0.10, blue: 0.12, alpha: 1.0)
         tableView.separatorColor = UIColor(white: 0.22, alpha: 1.0)
         tableView.register(UITableViewCell.self, forCellReuseIdentifier: "TakeCell")
+    }
+
+    @objc private func handleImportFromPhotos() {
+        PhotosImporter.requestPhotoPermissionIfNeeded { [weak self] granted in
+            guard let self = self else { return }
+            if !granted {
+                let alert = UIAlertController(
+                    title: "Photos Access Needed",
+                    message: "Please allow Photos access in Settings to import original videos.",
+                    preferredStyle: .alert
+                )
+                alert.addAction(UIAlertAction(title: "OK", style: .default))
+                self.present(alert, animated: true)
+                return
+            }
+            guard UIImagePickerController.isSourceTypeAvailable(.photoLibrary) else { return }
+            let picker = UIImagePickerController()
+            picker.sourceType = .photoLibrary
+            picker.mediaTypes = ["public.movie"]
+            picker.videoExportPreset = AVAssetExportPresetPassthrough
+            picker.delegate = self
+            self.present(picker, animated: true)
+        }
+    }
+
+    func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+        picker.dismiss(animated: true)
+    }
+
+    func imagePickerController(
+        _ picker: UIImagePickerController,
+        didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
+    ) {
+        picker.dismiss(animated: true) { [weak self] in
+            guard let self = self else { return }
+            let alert = UIAlertController(
+                title: "Importing Original Video",
+                message: "Preparing Virtual Gyro...",
+                preferredStyle: .alert
+            )
+            self.importAlert = alert
+            self.present(alert, animated: true)
+
+            PhotosImporter.importOriginalVideo(
+                fromPickerInfo: info,
+                progress: { [weak self] pct, msg in
+                    self?.importAlert?.message = String(format: "%.0f%% — %@", pct * 100.0, msg)
+                },
+                completion: { [weak self] result in
+                    guard let self = self else { return }
+                    self.importAlert?.dismiss(animated: true) {
+                        self.importAlert = nil
+                        switch result {
+                        case .success:
+                            self.reloadTakes()
+                        case .failure(let err):
+                            let errAlert = UIAlertController(
+                                title: "Import Failed",
+                                message: err.localizedDescription,
+                                preferredStyle: .alert
+                            )
+                            errAlert.addAction(UIAlertAction(title: "OK", style: .default))
+                            self.present(errAlert, animated: true)
+                        }
+                    }
+                }
+            )
+        }
     }
 
     override func viewWillAppear(_ animated: Bool) {

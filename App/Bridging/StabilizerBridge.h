@@ -11,6 +11,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, copy) NSString *axisPresetName;
 @property (nonatomic, assign) double signedReadoutTimeMs;
 @property (nonatomic, assign) BOOL hasReadoutEstimate;
+@property (nonatomic, assign) double effectiveFocalScale;
+@property (nonatomic, assign) BOOL hasFocalScaleEstimate;
 @property (nonatomic, copy) NSString *diagnosticMessage;
 @end
 
@@ -58,7 +60,8 @@ NS_ASSUME_NONNULL_BEGIN
                              axisPresetIndex:(NSInteger)axisPresetIndex
                         videoRotationDegrees:(NSInteger)videoRotationDegrees
                        hasReadoutOverride:(BOOL)hasReadoutOverride
-                      signedReadoutTimeMs:(double)signedReadoutTimeMs;
+                      signedReadoutTimeMs:(double)signedReadoutTimeMs
+                       focalScaleOverride:(double)focalScaleOverride;
 
 - (BOOL)warpPixelBuffer:(CVPixelBufferRef)srcPixelBuffer
         intoPixelBuffer:(CVPixelBufferRef)dstPixelBuffer

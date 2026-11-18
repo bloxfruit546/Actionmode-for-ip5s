@@ -130,9 +130,13 @@ final class TakeDetailViewController: UIViewController {
         let s = GFSidecarReaderBridge.inspectFile(atPath: take.sidecarURL.path)
         let movMB = Double(take.movSizeBytes) / (1024.0 * 1024.0)
         let gfKB = Double(take.sidecarSizeBytes) / 1024.0
+        let sourceBadge = s.isVirtualGyro
+            ? "VIRTUAL GYRO (OPTICAL RANSAC)\n        Note: Horizon Lock is Best-Effort (no real Accel)."
+            : "HARDWARE IMU (90Hz MEMS)"
 
         summaryTextView.text = String(format: """
         Take UUID     : %@
+        Source        : %@
         .mov Size     : %.2f MB
         .gfraw Size   : %.1f KB
         ----------------------------------------
@@ -152,6 +156,7 @@ final class TakeDetailViewController: UIViewController {
         Error         : %@
         """,
         take.uuid,
+        sourceBadge,
         movMB,
         gfKB,
         s.validHeader ? "YES (GFS5 v2)" : "NO",

@@ -14,6 +14,7 @@ typedef struct {
 @interface GFSidecarSummaryObjC : NSObject
 @property (nonatomic, assign) BOOL validHeader;
 @property (nonatomic, assign) BOOL hasFooter;
+@property (nonatomic, assign) BOOL isVirtualGyro;
 @property (nonatomic, assign) uint32_t captureMode;
 @property (nonatomic, assign) uint32_t width;
 @property (nonatomic, assign) uint32_t height;
@@ -94,6 +95,28 @@ typedef struct {
 - (void)reset;
 - (void)addSampleGx:(double)gx gy:(double)gy gz:(double)gz ax:(double)ax ay:(double)ay az:(double)az;
 - (GFGyroBiasCalibratorResultObjC *)finalizeWithMaxStdDev:(double)maxStdDev;
+@end
+
+@interface GFVirtualGyroResultObjC : NSObject
+@property (nonatomic, assign) BOOL success;
+@property (nonatomic, assign) uint64_t frameCount;
+@property (nonatomic, assign) uint64_t gyroCount;
+@property (nonatomic, assign) double meanInlierRatio;
+@property (nonatomic, copy) NSString *errorMessage;
+@end
+
+@interface GFVirtualGyroBuilderBridge : NSObject
+- (instancetype)initWithWidth:(uint32_t)width
+                       height:(uint32_t)height
+                   nominalFps:(double)fps
+               readoutTimeSec:(double)readoutSec
+                           fx:(double)fx
+                           fy:(double)fy
+                           cx:(double)cx
+                           cy:(double)cy
+                         uuid:(NSString *)uuid;
+- (BOOL)pushLumaData:(NSData *)lumaData width:(int)width height:(int)height timestampSec:(double)ts;
+- (GFVirtualGyroResultObjC *)finalizeAndWriteToPath:(NSString *)outputSidecarPath;
 @end
 
 NS_ASSUME_NONNULL_END

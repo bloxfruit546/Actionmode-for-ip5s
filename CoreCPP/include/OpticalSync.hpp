@@ -24,6 +24,8 @@ struct OpticalSyncResult {
     double axisMatrix[9] = {0, -1, 0, -1, 0, 0, 0, 0, -1};
     double signedReadoutTimeMs = 15.2;
     bool hasReadoutEstimate = false;
+    double effectiveFocalScale = 1.0;
+    bool hasFocalScaleEstimate = false;
     std::string diagnosticMessage;
 };
 

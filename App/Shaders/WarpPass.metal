@@ -149,8 +149,10 @@ kernel void lanczos4_warp_luma(
     }
 
     const float rawY = sum / max(wSum, 1e-5f);
-    const float clampedY = clamp(rawY, min2x2 - 0.015f, max2x2 + 0.015f);
-    outTex.write(float4(clamp(clampedY, 0.0f, 1.0f), 0.0f, 0.0f, 1.0f), gid);
+    // Soft Over-shoot Relaxation (0.025 tolerance, 75% deringing blend) to prevent sub-pixel shimmering
+    const float clampedY = clamp(rawY, min2x2 - 0.025f, max2x2 + 0.025f);
+    const float relaxedY = mix(rawY, clampedY, 0.75f);
+    outTex.write(float4(clamp(relaxedY, 0.0f, 1.0f), 0.0f, 0.0f, 1.0f), gid);
 }
 
 kernel void lanczos4_warp_chroma(

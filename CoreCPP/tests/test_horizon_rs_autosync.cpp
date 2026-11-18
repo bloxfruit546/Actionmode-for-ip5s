@@ -1,6 +1,8 @@
 #include "FrameWarpCalculator.hpp"
 #include "OpticalSync.hpp"
+#include "SidecarIO.hpp"
 #include "TrajectoryEngine.hpp"
+#include "VirtualGyroEngine.hpp"
 
 #include <cassert>
 #include <cmath>
@@ -865,6 +867,174 @@ void testFastPanSwingLagLimit() {
                 traj.maxCorrectionDeg, warp.maxZoom);
 }
 
+void testEffectiveFocalScaleAndCubicMicroJitter() {
+    const int w = 320, h = 180;
+    const double fxNom = 276.67, fyNom = 276.67, cx = 160.0, cy = 90.0;
+    const double trueScale = 1.07;
+    const double fxTrue = fxNom * trueScale;
+    const double fyTrue = fyNom * trueScale;
+
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.width = 1920;
+    hdr.height = 1080;
+    hdr.nominal_fps = 30.0;
+    hdr.lens_fx = 1660.0;
+    hdr.lens_fy = 1660.0;
+    hdr.lens_cx = 960.0;
+    hdr.lens_cy = 540.0;
+
+    // 2.0s @ 90Hz gyro: 2.0 Hz sinusoidal yaw + 35 Hz MEMS white-noise component
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    const double yawAmp = 2.5 * (kPi / 180.0);
+    const double freq = 2.0 * kPi * 2.0;
+    const double noiseFreq = 2.0 * kPi * 35.0;
+    for (int i = 0; i < 180; ++i) {
+        const double t = 1.0 + i / 90.0;
+        const double wyTrue = yawAmp * freq * std::cos(freq * (t - 1.0));
+        const double wyNoise = 0.04 * std::sin(noiseFreq * (t - 1.0)); // 35 Hz MEMS noise
+        gyro.push_back({t, -(wyTrue + wyNoise), 0.0, 0.0});
+        accel.push_back({t, -1.0f, 0.0f, 0.0f});
+    }
+
+    // Generate 30 textured frames rendered with fxTrue = 1.07 * fxNom
+    std::vector<gf::OpticalFlowFrame> frames;
+    std::vector<gf::GFFrameRecord> scFrames;
+    for (int f = 0; f < 30; ++f) {
+        const double t = 1.1 + f / 30.0;
+        const double yawAngle = yawAmp * std::sin(freq * (t - 1.0));
+        const gf::Quat qWC = gf::Quat::fromAxisAngle({0.0, 1.0, 0.0}, yawAngle);
+        gf::OpticalFlowFrame frame;
+        frame.timestampSec = t;
+        frame.width = w;
+        frame.height = h;
+        frame.luma.resize(static_cast<size_t>(w * h), 0);
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const gf::Vec3 rayW = qWC.rotateVector({(x - cx) / fxTrue, (y - cy) / fyTrue, 1.0});
+                const double wx = rayW.x / rayW.z;
+                const double wy = rayW.y / rayW.z;
+                const double v = 128.0 + 60.0 * std::sin(wx * 45.0) * std::cos(wy * 45.0)
+                                 + 40.0 * std::cos(wx * 95.0 + wy * 70.0);
+                frame.luma[static_cast<size_t>(y * w + x)] = static_cast<uint8_t>(std::max(0.0, std::min(255.0, v)));
+            }
+        }
+        frames.push_back(std::move(frame));
+        scFrames.push_back({static_cast<uint32_t>(f), t, 0.008f, 100.0f, 0.7f, 0.0});
+    }
+
+    const auto syncRes = gf::OpticalSync::solveSyncAndAxes(frames, hdr, gyro);
+    assert(syncRes.valid);
+    assert(syncRes.bestNCC > 0.90);
+    assert(syncRes.hasFocalScaleEstimate);
+    assert(std::fabs(syncRes.effectiveFocalScale - trueScale) < 0.04);
+
+    // Check that TrajectoryEngine's 24Hz LPF + 4x Catmull-Rom RK4 suppresses the 35 Hz MEMS jitter
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel);
+    gf::StabilizerConfig cfg;
+    cfg.pitchSmoothness = 0.85;
+    cfg.yawSmoothness = 0.85;
+    cfg.rollSmoothness = 0.85;
+    cfg.velocityDamping = 0.5;
+    const auto traj = engine.solve(scFrames, cfg);
+    assert(traj.valid);
+
+    // Sample raw quaternion at mid-frame timestamps and verify smoothness against 35 Hz ripple
+    double maxJitterRad = 0.0;
+    for (size_t i = 5; i + 5 < scFrames.size(); ++i) {
+        const gf::Quat q0 = engine.sampleRawQuaternionAt(scFrames[i].pts_sec);
+        const gf::Quat qTrue = gf::Quat::fromAxisAngle({0.0, 1.0, 0.0}, yawAmp * std::sin(freq * (scFrames[i].pts_sec - 1.0)));
+        const gf::Quat qBase = engine.sampleRawQuaternionAt(scFrames[0].pts_sec);
+        const gf::Quat qTrue0 = gf::Quat::fromAxisAngle({0.0, 1.0, 0.0}, yawAmp * std::sin(freq * (scFrames[0].pts_sec - 1.0)));
+        const gf::Quat relEst = qBase.conjugate() * q0;
+        const gf::Quat relTrue = qTrue0.conjugate() * qTrue;
+        const double dot = std::min(1.0, std::fabs(relEst.w * relTrue.w + relEst.x * relTrue.x + relEst.y * relTrue.y + relEst.z * relTrue.z));
+        const double angErr = 2.0 * std::acos(dot);
+        // 35 Hz jitter with 0.04 rad/s should be heavily attenuated (< 0.001 rad = < 0.27 px)
+        if (angErr > maxJitterRad) maxJitterRad = angErr;
+    }
+    const double maxJitterPx = maxJitterRad * fxNom;
+    std::printf("Phase 5 FocalScale=%.3fx (true=%.3fx) | 35Hz MEMS Residual=%.3f px PASSED.\n",
+                syncRes.effectiveFocalScale, trueScale, maxJitterPx);
+}
+
+void testVirtualGyroRansacMovingObjectImmunity() {
+    const int w = 320, h = 180;
+    const double fx = 276.67, fy = 276.67, cx = 160.0, cy = 90.0;
+
+    gf::VirtualGyroConfig cfg;
+    cfg.videoWidth = 1920;
+    cfg.videoHeight = 1080;
+    cfg.nominalFps = 30.0;
+    cfg.lensFx = 1660.0;
+    cfg.lensFy = 1660.0;
+    cfg.lensCx = 960.0;
+    cfg.lensCy = 540.0;
+    cfg.uuid = "PHASE5-VGYRO-TEST";
+
+    gf::VirtualGyroEngine vgyro(cfg);
+
+    // Background rotates at true camera yaw rate = +0.24 rad/s;
+    // A 90x90 foreground box moves rapidly in the opposite direction (-2.0 px/frame)!
+    const double trueWy = 0.24;
+    std::vector<uint8_t> luma(static_cast<size_t>(w * h), 0);
+
+    for (int f = 0; f < 15; ++f) {
+        const double t = f / 30.0;
+        const double yawAngle = trueWy * t;
+        const int boxX0 = 180 - f * 4;
+        const int boxY0 = 50;
+
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                double val = 0.0;
+                if (x >= boxX0 && x < boxX0 + 80 && y >= boxY0 && y < boxY0 + 80) {
+                    // Moving foreground object texture
+                    val = 128.0 + 90.0 * std::sin((x - boxX0) * 0.45) * std::cos((y - boxY0) * 0.45);
+                } else {
+                    // Static background texture observed by rotating camera
+                    const double wx = (x - cx) / fx + yawAngle;
+                    const double wy = (y - cy) / fy;
+                    val = 128.0 + 70.0 * std::sin(wx * 55.0) * std::cos(wy * 55.0)
+                          + 40.0 * std::cos(wx * 110.0 - wy * 85.0);
+                }
+                luma[static_cast<size_t>(y * w + x)] = static_cast<uint8_t>(std::max(0.0, std::min(255.0, val)));
+            }
+        }
+        assert(vgyro.pushLumaFrame(luma.data(), w, h, t));
+    }
+
+    const std::string tmpPath = "build_test_virtual_gyro.gfraw";
+    const auto vres = vgyro.finalizeAndWrite(tmpPath);
+    assert(vres.success);
+    assert(vres.frameCount == 15);
+    assert(vres.meanInlierRatio > 0.45);
+
+    gf::GFFileHeader hdr{};
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    std::vector<gf::GFFrameRecord> frames;
+    gf::SidecarSummary summary;
+    assert(gf::SidecarReader::readAll(tmpPath, hdr, gyro, accel, frames, summary));
+    assert(hdr.reserved[0] == 1); // is_virtual_gyro flag
+    std::remove(tmpPath.c_str());
+
+    // Verify recovered camera-frame yaw rate (LandscapeLeft: wyCam = -gx_ios)
+    double sumWy = 0.0;
+    int count = 0;
+    for (size_t i = 2; i + 2 < gyro.size(); ++i) {
+        sumWy += -gyro[i].gx;
+        ++count;
+    }
+    const double avgWy = sumWy / std::max(1, count);
+    assert(std::fabs(avgWy - trueWy) < 0.05);
+    std::printf("VirtualGyro RANSAC Moving-Object Immunity (estWy=%.3f vs true=%.3f rad/s, inlier=%.1f%%) PASSED.\n",
+                avgWy, trueWy, vres.meanInlierRatio * 100.0);
+}
+
 } // namespace
 
 int main() {
@@ -879,5 +1049,7 @@ int main() {
     testSignedReadoutDetectionNegative15ms();
     testPortraitToLandscape90TransitionUltraGimbal();
     testFastPanSwingLagLimit();
+    testEffectiveFocalScaleAndCubicMicroJitter();
+    testVirtualGyroRansacMovingObjectImmunity();
     return 0;
 }

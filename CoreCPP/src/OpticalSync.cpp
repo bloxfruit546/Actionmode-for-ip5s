@@ -425,16 +425,56 @@ OpticalSyncResult OpticalSync::solveSyncAndAxes(
         }
     }
 
-    double refinedOffsetMs = -80.0 + bestOffIdx * 2.0;
-    if (bestOffIdx > 0 && bestOffIdx < numOffsets - 1) {
-        const double yL = bestPresetCurve[bestOffIdx - 1];
-        const double yC = bestPresetCurve[bestOffIdx];
-        const double yR = bestPresetCurve[bestOffIdx + 1];
-        const double denom = 2.0 * (yL - 2.0 * yC + yR);
-        if (std::fabs(denom) > 1e-9) {
-            const double delta = std::min(0.5, std::max(-0.5, (yL - yR) / denom));
-            refinedOffsetMs += delta * 2.0;
+    auto evalNccAtOffsetMs = [&](double offMs) -> double {
+        const double* M = presets[bestPreset].m;
+        const double offSec = offMs * 0.001;
+        double dotSum = 0.0;
+        double visNormSq = 0.0;
+        double imuNormSq = 0.0;
+        for (const auto& vs : visSamples) {
+            const SampledGyro raw = sampleGyroAt(sortedGyro, vs.tMid + offSec);
+            const double gx = raw.gx - header.gyro_bias_x;
+            const double gy = raw.gy - header.gyro_bias_y;
+            const double gz = raw.gz - header.gyro_bias_z;
+            const double ix = M[0] * gx + M[1] * gy + M[2] * gz;
+            const double iy = M[3] * gx + M[4] * gy + M[5] * gz;
+            const double iz = M[6] * gx + M[7] * gy + M[8] * gz;
+            dotSum += vs.wx * ix + vs.wy * iy + vs.wz * iz;
+            visNormSq += vs.wx * vs.wx + vs.wy * vs.wy + vs.wz * vs.wz;
+            imuNormSq += ix * ix + iy * iy + iz * iz;
         }
+        const double denom = std::sqrt(visNormSq * imuNormSq);
+        return (denom > 1e-9) ? (dotSum / denom) : 0.0;
+    };
+
+    // Golden-Section Search to refine offset to < 0.1 ms precision
+    const double coarseCenterMs = -80.0 + bestOffIdx * 2.0;
+    double gsA = std::max(-80.0, coarseCenterMs - 2.0);
+    double gsB = std::min(80.0, coarseCenterMs + 2.0);
+    constexpr double kInvPhi = 0.6180339887498949;
+    double gsC = gsB - kInvPhi * (gsB - gsA);
+    double gsD = gsA + kInvPhi * (gsB - gsA);
+    double fC = evalNccAtOffsetMs(gsC);
+    double fD = evalNccAtOffsetMs(gsD);
+    for (int iter = 0; iter < 14; ++iter) {
+        if (fC < fD) {
+            gsA = gsC;
+            gsC = gsD;
+            fC = fD;
+            gsD = gsA + kInvPhi * (gsB - gsA);
+            fD = evalNccAtOffsetMs(gsD);
+        } else {
+            gsB = gsD;
+            gsD = gsC;
+            fD = fC;
+            gsC = gsB - kInvPhi * (gsB - gsA);
+            fC = evalNccAtOffsetMs(gsC);
+        }
+    }
+    const double refinedOffsetMs = 0.5 * (gsA + gsB);
+    const double refinedNcc = evalNccAtOffsetMs(refinedOffsetMs);
+    if (refinedNcc > bestNccOverall) {
+        bestNccOverall = refinedNcc;
     }
 
     result.valid = true;
@@ -443,6 +483,56 @@ OpticalSyncResult OpticalSync::solveSyncAndAxes(
     result.bestAxisPresetIndex = bestPreset;
     result.axisPresetName = presets[bestPreset].name;
     std::copy(std::begin(presets[bestPreset].m), std::end(presets[bestPreset].m), std::begin(result.axisMatrix));
+
+    // IRLS effective focal scale estimation (compensates focus breathing / lens tolerance)
+    result.effectiveFocalScale = 1.0;
+    result.hasFocalScaleEstimate = false;
+    if (bestNccOverall >= 0.70 && visSamples.size() >= 8) {
+        const double* M = presets[bestPreset].m;
+        const double offSec = refinedOffsetMs * 0.001;
+        struct FocalPair {
+            double vwx, vwy, iwx, iwy, weight;
+        };
+        std::vector<FocalPair> pairs;
+        pairs.reserve(visSamples.size());
+        double imuXYEnergy = 0.0;
+        for (const auto& vs : visSamples) {
+            const SampledGyro raw = sampleGyroAt(sortedGyro, vs.tMid + offSec);
+            const double gx = raw.gx - header.gyro_bias_x;
+            const double gy = raw.gy - header.gyro_bias_y;
+            const double gz = raw.gz - header.gyro_bias_z;
+            const double ix = M[0] * gx + M[1] * gy + M[2] * gz;
+            const double iy = M[3] * gx + M[4] * gy + M[5] * gz;
+            const double magSq = ix * ix + iy * iy;
+            if (magSq > 1e-4) {
+                pairs.push_back({vs.wx, vs.wy, ix, iy, 1.0});
+                imuXYEnergy += magSq;
+            }
+        }
+        if (pairs.size() >= 6 && imuXYEnergy > 0.02) {
+            double focalScale = 1.0;
+            for (int iter = 0; iter < 3; ++iter) {
+                double num = 0.0;
+                double den = 0.0;
+                for (const auto& p : pairs) {
+                    num += p.weight * (p.vwx * p.iwx + p.vwy * p.iwy);
+                    den += p.weight * (p.iwx * p.iwx + p.iwy * p.iwy);
+                }
+                if (den <= 1e-9) break;
+                focalScale = num / den;
+                for (auto& p : pairs) {
+                    const double ex = p.vwx - focalScale * p.iwx;
+                    const double ey = p.vwy - focalScale * p.iwy;
+                    const double err = std::hypot(ex, ey);
+                    p.weight = (err < 0.05) ? 1.0 : (0.05 / (err + 1e-6));
+                }
+            }
+            if (std::isfinite(focalScale)) {
+                result.effectiveFocalScale = std::max(0.85, std::min(1.20, focalScale));
+                result.hasFocalScaleEstimate = true;
+            }
+        }
+    }
 
     // Estimate signed rolling-shutter readout time (top-half vs bottom-half row lag)
     const double defaultRsMs = (header.readout_time_sec > 1e-5) ? (header.readout_time_sec * 1000.0) : 15.2;
@@ -586,11 +676,12 @@ OpticalSyncResult OpticalSync::solveSyncAndAxes(
         }
     }
 
-    char buf[200];
+    char buf[240];
     std::snprintf(
         buf, sizeof(buf),
-        "Auto-Sync: %+.1f ms | NCC: %.3f | RS: %+.1f ms | Axis: %s",
-        result.bestOffsetMs, result.bestNCC, result.signedReadoutTimeMs, result.axisPresetName.c_str()
+        "Auto-Sync: %+.1f ms | NCC: %.3f | RS: %+.1f ms | Scale: %.3fx | Axis: %s",
+        result.bestOffsetMs, result.bestNCC, result.signedReadoutTimeMs,
+        result.effectiveFocalScale, result.axisPresetName.c_str()
     );
     result.diagnosticMessage = buf;
     return result;

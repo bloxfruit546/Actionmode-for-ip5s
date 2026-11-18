@@ -1,6 +1,7 @@
 #import "SidecarBridge.h"
 #import "CalibrationProfile.hpp"
 #import "SidecarIO.hpp"
+#import "VirtualGyroEngine.hpp"
 
 #import <ImageIO/ImageIO.h>
 #include <cstring>
@@ -110,6 +111,7 @@
     GFSidecarSummaryObjC *out = [[GFSidecarSummaryObjC alloc] init];
     out.validHeader = s.validHeader ? YES : NO;
     out.hasFooter = s.hasFooter ? YES : NO;
+    out.isVirtualGyro = (s.header.reserved[0] != 0) ? YES : NO;
     out.captureMode = s.header.capture_mode;
     out.width = s.header.width;
     out.height = s.header.height;
@@ -213,6 +215,66 @@
     out.gravityZ = res.gravityZ;
     out.maxGyroStdDev = res.maxGyroStdDev;
     out.sampleCount = res.sampleCount;
+    return out;
+}
+
+@end
+
+@implementation GFVirtualGyroResultObjC
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _errorMessage = @"";
+    }
+    return self;
+}
+@end
+
+@implementation GFVirtualGyroBuilderBridge {
+    std::unique_ptr<gf::VirtualGyroEngine> _engine;
+}
+
+- (instancetype)initWithWidth:(uint32_t)width
+                       height:(uint32_t)height
+                   nominalFps:(double)fps
+               readoutTimeSec:(double)readoutSec
+                           fx:(double)fx
+                           fy:(double)fy
+                           cx:(double)cx
+                           cy:(double)cy
+                         uuid:(NSString *)uuid {
+    self = [super init];
+    if (self) {
+        gf::VirtualGyroConfig cfg;
+        cfg.videoWidth = width;
+        cfg.videoHeight = height;
+        cfg.nominalFps = fps;
+        cfg.readoutTimeSec = readoutSec;
+        cfg.lensFx = fx;
+        cfg.lensFy = fy;
+        cfg.lensCx = cx;
+        cfg.lensCy = cy;
+        cfg.uuid = uuid ? std::string([uuid UTF8String]) : "";
+        _engine = std::make_unique<gf::VirtualGyroEngine>(cfg);
+    }
+    return self;
+}
+
+- (BOOL)pushLumaData:(NSData *)lumaData width:(int)width height:(int)height timestampSec:(double)ts {
+    if (!lumaData || lumaData.length < (NSUInteger)(width * height)) {
+        return NO;
+    }
+    return _engine->pushLumaFrame((const uint8_t *)lumaData.bytes, width, height, ts) ? YES : NO;
+}
+
+- (GFVirtualGyroResultObjC *)finalizeAndWriteToPath:(NSString *)outputSidecarPath {
+    const gf::VirtualGyroResult res = _engine->finalizeAndWrite([outputSidecarPath UTF8String]);
+    GFVirtualGyroResultObjC *out = [[GFVirtualGyroResultObjC alloc] init];
+    out.success = res.success ? YES : NO;
+    out.frameCount = res.frameCount;
+    out.gyroCount = res.gyroCount;
+    out.meanInlierRatio = res.meanInlierRatio;
+    out.errorMessage = [NSString stringWithUTF8String:res.errorMessage.c_str()] ?: @"";
     return out;
 }
 

@@ -152,6 +152,71 @@ int detectGravityQuadrantDeg(const Vec3& gWorld) {
     return (gWorld.x >= 0.0) ? 90 : 270;
 }
 
+// 2nd-order Butterworth LPF (fc = 24.0 Hz) applied forward-backward (zero phase) to suppress MEMS white noise
+void zeroPhaseButterworthLPF(std::vector<Vec3>& data, double fs, double fc) {
+    if (data.size() < 12 || fs <= 2.2 * fc) {
+        return;
+    }
+    const double w0 = 2.0 * kPi * fc / fs;
+    const double cosW0 = std::cos(w0);
+    const double sinW0 = std::sin(w0);
+    const double alpha = sinW0 / std::sqrt(2.0); // Q = 1/sqrt(2)
+
+    const double a0 = 1.0 + alpha;
+    const double b0 = ((1.0 - cosW0) * 0.5) / a0;
+    const double b1 = (1.0 - cosW0) / a0;
+    const double b2 = b0;
+    const double a1 = (-2.0 * cosW0) / a0;
+    const double a2 = (1.0 - alpha) / a0;
+
+    auto runPass = [&](bool reverse) {
+        const size_t n = data.size();
+        auto getAt = [&](size_t idx) -> Vec3 {
+            return reverse ? data[n - 1 - idx] : data[idx];
+        };
+        auto setAt = [&](size_t idx, const Vec3& v) {
+            if (reverse) {
+                data[n - 1 - idx] = v;
+            } else {
+                data[idx] = v;
+            }
+        };
+
+        Vec3 x1 = getAt(0), x2 = getAt(0);
+        Vec3 y1 = getAt(0), y2 = getAt(0);
+        for (size_t i = 0; i < n; ++i) {
+            const Vec3 x0 = getAt(i);
+            const Vec3 y0(
+                b0 * x0.x + b1 * x1.x + b2 * x2.x - a1 * y1.x - a2 * y2.x,
+                b0 * x0.y + b1 * x1.y + b2 * x2.y - a1 * y1.y - a2 * y2.y,
+                b0 * x0.z + b1 * x1.z + b2 * x2.z - a1 * y1.z - a2 * y2.z
+            );
+            setAt(i, y0);
+            x2 = x1; x1 = x0;
+            y2 = y1; y1 = y0;
+        }
+    };
+
+    runPass(false);
+    runPass(true);
+}
+
+Vec3 catmullRomVec3(const Vec3& p0, const Vec3& p1, const Vec3& p2, const Vec3& p3, double t) {
+    const double t2 = t * t;
+    const double t3 = t2 * t;
+    auto eval = [&](double v0, double v1, double v2, double v3) -> double {
+        return 0.5 * (
+            (2.0 * v1) +
+            (-v0 + v2) * t +
+            (2.0 * v0 - 5.0 * v1 + 4.0 * v2 - v3) * t2 +
+            (-v0 + 3.0 * v1 - 3.0 * v2 + v3) * t3
+        );
+    };
+    return Vec3(eval(p0.x, p1.x, p2.x, p3.x),
+                eval(p0.y, p1.y, p2.y, p3.y),
+                eval(p0.z, p1.z, p2.z, p3.z));
+}
+
 } // namespace
 
 void TrajectoryEngine::setImuData(
@@ -190,19 +255,41 @@ void TrajectoryEngine::setImuData(
 
     const Vec3 biasIos(header.gyro_bias_x, header.gyro_bias_y, header.gyro_bias_z);
 
-    // Pass 1: Pure RK4 Gyro integration (immune to linear shake acceleration)
+    // Pass 1: Zero-Phase 24Hz MEMS White-Noise Pre-Filter (when fs > 55Hz) + 4x Catmull-Rom RK4 integration
     const size_t nGyro = dedupGyro.size();
     std::vector<Quat> qPureGyro(nGyro, Quat::identity());
     std::vector<Vec3> omegaCamArr(nGyro);
 
+    double dtSum = 0.0;
     for (size_t i = 0; i < nGyro; ++i) {
         const auto& g = dedupGyro[i];
         const Vec3 rawOmegaIos(g.gx - biasIos.x, g.gy - biasIos.y, g.gz - biasIos.z);
         omegaCamArr[i] = applyAxisMatrix(M, rawOmegaIos);
         if (i > 0) {
-            const double dt = std::min(0.1, std::max(1e-6, g.timestamp_sec - dedupGyro[i - 1].timestamp_sec));
-            qPureGyro[i] = Quat::integrateGyroStep(qPureGyro[i - 1], omegaCamArr[i], dt);
+            dtSum += std::min(0.1, std::max(1e-6, g.timestamp_sec - dedupGyro[i - 1].timestamp_sec));
         }
+    }
+    const double avgDt = (nGyro > 1) ? (dtSum / static_cast<double>(nGyro - 1)) : (1.0 / 90.0);
+    const double fsEst = 1.0 / std::max(avgDt, 1e-4);
+    if (fsEst > 55.0) {
+        zeroPhaseButterworthLPF(omegaCamArr, fsEst, 24.0);
+    }
+
+    for (size_t i = 1; i < nGyro; ++i) {
+        const double dt = std::min(0.1, std::max(1e-6, dedupGyro[i].timestamp_sec - dedupGyro[i - 1].timestamp_sec));
+        const Vec3& w0 = omegaCamArr[(i >= 2) ? (i - 2) : 0];
+        const Vec3& w1 = omegaCamArr[i - 1];
+        const Vec3& w2 = omegaCamArr[i];
+        const Vec3& w3 = omegaCamArr[(i + 1 < nGyro) ? (i + 1) : (nGyro - 1)];
+
+        Quat qSub = qPureGyro[i - 1];
+        const double dtSub = dt * 0.25;
+        for (int s = 0; s < 4; ++s) {
+            const double uMid = (static_cast<double>(s) + 0.5) * 0.25;
+            const Vec3 wMid = catmullRomVec3(w0, w1, w2, w3, uMid);
+            qSub = Quat::integrateGyroStep(qSub, wMid, dtSub);
+        }
+        qPureGyro[i] = qSub;
     }
 
     // Pass 2: Zero-Phase VQF-Style Offline Gravity Estimator (tau_g = 3.0s)
@@ -310,7 +397,16 @@ void TrajectoryEngine::setImuData(
                     const Vec3 gEst = q.conjugate().rotateVector(gSmooth[aIdx]);
                     feedback = aCam.cross(gEst) * (kpMahony * accWeight[aIdx]);
                 }
-                q = Quat::integrateGyroStep(q, omegaCamArr[i] + feedback, dt);
+                const Vec3& w0 = omegaCamArr[(i >= 2) ? (i - 2) : 0];
+                const Vec3& w1 = omegaCamArr[i - 1];
+                const Vec3& w2 = omegaCamArr[i];
+                const Vec3& w3 = omegaCamArr[(i + 1 < nGyro) ? (i + 1) : (nGyro - 1)];
+                const double dtSub = dt * 0.25;
+                for (int s = 0; s < 4; ++s) {
+                    const double uMid = (static_cast<double>(s) + 0.5) * 0.25;
+                    const Vec3 wMid = catmullRomVec3(w0, w1, w2, w3, uMid) + feedback;
+                    q = Quat::integrateGyroStep(q, wMid, dtSub);
+                }
             }
             integratedSamples_.push_back({tG, q, omegaCamArr[i], gSmooth[aIdx]});
         }
@@ -364,8 +460,18 @@ Quat TrajectoryEngine::sampleRawQuaternionAt(double timestampSec) const {
     if (span <= 1e-9) {
         return s0.quat;
     }
-    const double t = (timestampSec - s0.timestampSec) / span;
-    return slerpShortest(s0.quat, s1.quat, t);
+    const double u = (timestampSec - s0.timestampSec) / span;
+    // Cubic Hermite C1 spline in so(3) tangent space using exact angular velocity tangents
+    const Vec3 p1 = quatLog(s0.quat.conjugate() * s1.quat);
+    const Vec3 m0 = s0.omegaCam * span;
+    const Vec3 m1 = s1.omegaCam * span;
+    const double u2 = u * u;
+    const double u3 = u2 * u;
+    const double h10 = u3 - 2.0 * u2 + u;
+    const double h01 = -2.0 * u3 + 3.0 * u2;
+    const double h11 = u3 - u2;
+    const Vec3 rInterp = m0 * h10 + p1 * h01 + m1 * h11;
+    return (s0.quat * quatExp(rInterp)).normalized();
 }
 
 Vec3 TrajectoryEngine::sampleGravityWorldAt(double timestampSec) const {
@@ -524,6 +630,22 @@ TrajectoryResult TrajectoryEngine::solve(
             const Quat qHorizon = (quatFromBasis(xc, yc, zc) * screenAlignQ).normalized();
             result.smoothFrameQuats[i] = slerpShortest(result.smoothFrameQuats[i], qHorizon, amount);
         }
+    }
+
+    // Light 5-tap (+-2 frames) Gaussian pass in so(3) before Swing-Lag Limiter
+    if (n >= 5 && (pSmooth > 1e-4 || ySmooth > 1e-4 || rSmooth > 1e-4)) {
+        std::vector<Quat> polished = result.smoothFrameQuats;
+        constexpr double weights[5] = {1.0 / 16.0, 4.0 / 16.0, 6.0 / 16.0, 4.0 / 16.0, 1.0 / 16.0};
+        for (size_t i = 2; i + 2 < n; ++i) {
+            const Quat& qCenter = result.smoothFrameQuats[i];
+            Vec3 rAvg(0.0, 0.0, 0.0);
+            for (int k = -2; k <= 2; ++k) {
+                const Vec3 rk = quatLog(qCenter.conjugate() * result.smoothFrameQuats[i + k]);
+                rAvg = rAvg + rk * weights[k + 2];
+            }
+            polished[i] = (qCenter * quatExp(rAvg)).normalized();
+        }
+        result.smoothFrameQuats = std::move(polished);
     }
 
     // Separate Swing-Lag Limit (1:1 up to 7 deg, smooth tanh saturation to 11 deg) vs Full Roll Lock (-180..+180 deg)

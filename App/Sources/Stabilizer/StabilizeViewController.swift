@@ -9,6 +9,7 @@ final class StabilizeViewController: UIViewController {
     private var detectedAxisPresetIndex: Int = -1
     private var hasReadoutOverride: Bool = false
     private var detectedSignedReadoutMs: Double = 15.2
+    private var detectedFocalScale: Double = 1.0
 
     private let scrollView: UIScrollView = {
         let sv = UIScrollView()
@@ -181,6 +182,17 @@ final class StabilizeViewController: UIViewController {
         return btn
     }()
 
+    private let addQueueButton: UIButton = {
+        let btn = UIButton(type: .system)
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        btn.setTitle("ADD TO RENDER QUEUE", for: .normal)
+        btn.setTitleColor(.white, for: .normal)
+        btn.titleLabel?.font = UIFont.systemFont(ofSize: 13, weight: .bold)
+        btn.backgroundColor = UIColor(red: 0.28, green: 0.36, blue: 0.54, alpha: 1.0)
+        btn.layer.cornerRadius = 8
+        return btn
+    }()
+
     init(take: CaptureTake) {
         self.take = take
         super.init(nibName: nil, bundle: nil)
@@ -237,6 +249,7 @@ final class StabilizeViewController: UIViewController {
         autoSyncButton.addTarget(self, action: #selector(handleAutoSync), for: .touchUpInside)
         previewButton.addTarget(self, action: #selector(handlePreview), for: .touchUpInside)
         renderButton.addTarget(self, action: #selector(handleRenderTap), for: .touchUpInside)
+        addQueueButton.addTarget(self, action: #selector(handleAddToQueue), for: .touchUpInside)
         playButton.addTarget(self, action: #selector(handlePlay), for: .touchUpInside)
         savePhotosButton.addTarget(self, action: #selector(handleSavePhotos), for: .touchUpInside)
         shareButton.addTarget(self, action: #selector(handleShare), for: .touchUpInside)
@@ -293,6 +306,7 @@ final class StabilizeViewController: UIViewController {
             progressView,
             statusLabel,
             renderButton,
+            addQueueButton,
             playButton,
             savePhotosButton,
             shareButton
@@ -324,6 +338,7 @@ final class StabilizeViewController: UIViewController {
             autoSyncButton.heightAnchor.constraint(equalToConstant: 40),
             previewButton.heightAnchor.constraint(equalToConstant: 38),
             renderButton.heightAnchor.constraint(equalToConstant: 46),
+            addQueueButton.heightAnchor.constraint(equalToConstant: 40),
             playButton.heightAnchor.constraint(equalToConstant: 42),
             savePhotosButton.heightAnchor.constraint(equalToConstant: 42),
             shareButton.heightAnchor.constraint(equalToConstant: 42)
@@ -346,8 +361,20 @@ final class StabilizeViewController: UIViewController {
             dynamicZoomEnabled: dynamicZoomSwitch.isOn,
             axisPresetIndex: detectedAxisPresetIndex,
             hasReadoutOverride: hasReadoutOverride,
-            signedReadoutTimeMs: detectedSignedReadoutMs
+            signedReadoutTimeMs: detectedSignedReadoutMs,
+            focalScaleOverride: detectedFocalScale
         )
+    }
+
+    @objc private func handleAddToQueue() {
+        RenderQueueManager.shared.enqueue(take: take, config: currentConfig())
+        let alert = UIAlertController(
+            title: "Added to Render Queue",
+            message: "Job queued. Switch to the Queue tab to monitor background progress or resume.",
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "OK", style: .default))
+        present(alert, animated: true)
     }
 
     @objc private func handleUltraGimbalPreset() {
@@ -421,6 +448,7 @@ final class StabilizeViewController: UIViewController {
                     self.detectedAxisPresetIndex = res.bestAxisPresetIndex
                     self.hasReadoutOverride = res.hasReadoutEstimate
                     self.detectedSignedReadoutMs = res.signedReadoutTimeMs
+                    self.detectedFocalScale = res.hasFocalScaleEstimate ? res.effectiveFocalScale : 1.0
                     self.offsetSlider.value = Float(res.bestOffsetMs)
                     self.updateSliderLabels()
                     self.autoSyncLabel.textColor = UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0)

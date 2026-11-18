@@ -3,7 +3,7 @@ import CoreVideo
 import Foundation
 import Photos
 
-struct StabilizeExportConfig {
+struct StabilizeExportConfig: Codable {
     let pitchSmoothness: Double
     let yawSmoothness: Double
     let rollSmoothness: Double
@@ -18,6 +18,7 @@ struct StabilizeExportConfig {
     let axisPresetIndex: Int
     let hasReadoutOverride: Bool
     let signedReadoutTimeMs: Double
+    let focalScaleOverride: Double
 }
 
 struct StabilizeExportResult {
@@ -548,7 +549,8 @@ final class OfflineRenderPipeline {
             axisPresetIndex: config.axisPresetIndex,
             videoRotationDegrees: videoRotationDegrees,
             hasReadoutOverride: config.hasReadoutOverride,
-            signedReadoutTimeMs: config.signedReadoutTimeMs
+            signedReadoutTimeMs: config.signedReadoutTimeMs,
+            focalScaleOverride: config.focalScaleOverride
         )
     }
 
