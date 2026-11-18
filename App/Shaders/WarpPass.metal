@@ -41,7 +41,7 @@ inline float lanczos2_weight(float x) {
     return sinc_f(x) * sinc_f(x * 0.5f);
 }
 
-inline float2 solveRollingShutterAndDistort(
+inline float3 solveRollingShutterAndDistort(
     float dstLumaX,
     float dstLumaY,
     constant WarpFrameUniforms& u
@@ -65,25 +65,31 @@ inline float2 solveRollingShutterAndDistort(
         const float3 r2 = mix(u.slices[i0].hRow2.xyz, u.slices[i0 + 1].hRow2.xyz, t);
 
         const float w = dot(r2, dstP);
-        const float invW = 1.0f / max(w, 1e-5f);
+        if (w <= 0.10f) {
+            return float3(0.0f, 0.0f, 0.0f);
+        }
+        const float invW = 1.0f / w;
         sx = dot(r0, dstP) * invW;
         sy = dot(r1, dstP) * invW;
         rowNorm = clamp(sy / inHMinus1, 0.0f, 1.0f);
     }
 
-    // Apply radial Brown-Conrady lens distortion model if non-zero
+    // Apply radial Brown-Conrady lens distortion model with fold-over guard (r2 <= 2.5)
     const float k1 = u.distortion.x;
     const float k2 = u.distortion.y;
     if (fabs(k1) > 1e-6f || fabs(k2) > 1e-6f) {
         const float xn = (sx - u.intrinsics.z) / u.intrinsics.x;
         const float yn = (sy - u.intrinsics.w) / u.intrinsics.y;
         const float r2 = xn * xn + yn * yn;
+        if (r2 > 2.5f) {
+            return float3(0.0f, 0.0f, 0.0f);
+        }
         const float radial = 1.0f + k1 * r2 + k2 * r2 * r2;
         sx = xn * radial * u.intrinsics.x + u.intrinsics.z;
         sy = yn * radial * u.intrinsics.y + u.intrinsics.w;
     }
 
-    return float2(sx, sy);
+    return float3(sx, sy, 1.0f);
 }
 
 kernel void lanczos4_warp_luma(
@@ -96,7 +102,15 @@ kernel void lanczos4_warp_luma(
         return;
     }
 
-    const float2 src = solveRollingShutterAndDistort(float(gid.x) + 0.5f, float(gid.y) + 0.5f, u) - 0.5f;
+    const float3 solved = solveRollingShutterAndDistort(float(gid.x) + 0.5f, float(gid.y) + 0.5f, u);
+    if (solved.z < 0.5f ||
+        solved.x < 0.0f || solved.x > float(u.inSize.x) ||
+        solved.y < 0.0f || solved.y > float(u.inSize.y)) {
+        outTex.write(float4(0.0f, 0.0f, 0.0f, 1.0f), gid);
+        return;
+    }
+
+    const float2 src = solved.xy - 0.5f;
     const int ix = int(floor(src.x));
     const int iy = int(floor(src.y));
     const float fx = src.x - float(ix);
@@ -113,6 +127,14 @@ kernel void lanczos4_warp_luma(
     const int maxX = int(u.inSize.x) - 1;
     const int maxY = int(u.inSize.y) - 1;
 
+    // 2x2 neighborhood bounds for Anti-Ringing Clamped Lanczos4
+    const float c00 = inTex.read(uint2(clamp(ix, 0, maxX), clamp(iy, 0, maxY))).r;
+    const float c10 = inTex.read(uint2(clamp(ix + 1, 0, maxX), clamp(iy, 0, maxY))).r;
+    const float c01 = inTex.read(uint2(clamp(ix, 0, maxX), clamp(iy + 1, 0, maxY))).r;
+    const float c11 = inTex.read(uint2(clamp(ix + 1, 0, maxX), clamp(iy + 1, 0, maxY))).r;
+    const float min2x2 = min(min(c00, c10), min(c01, c11));
+    const float max2x2 = max(max(c00, c10), max(c01, c11));
+
     float sum = 0.0f;
     float wSum = 0.0f;
     for (int dy = -3; dy <= 4; ++dy) {
@@ -126,8 +148,9 @@ kernel void lanczos4_warp_luma(
         }
     }
 
-    const float outY = clamp(sum / max(wSum, 1e-5f), 0.0f, 1.0f);
-    outTex.write(float4(outY, 0.0f, 0.0f, 1.0f), gid);
+    const float rawY = sum / max(wSum, 1e-5f);
+    const float clampedY = clamp(rawY, min2x2 - 0.015f, max2x2 + 0.015f);
+    outTex.write(float4(clamp(clampedY, 0.0f, 1.0f), 0.0f, 0.0f, 1.0f), gid);
 }
 
 kernel void lanczos4_warp_chroma(
@@ -141,9 +164,16 @@ kernel void lanczos4_warp_chroma(
     }
 
     const float2 lumaDst = float2(gid) * 2.0f + 1.0f;
-    const float2 srcLuma = solveRollingShutterAndDistort(lumaDst.x, lumaDst.y, u);
-    const float sx = (srcLuma.x - 1.0f) * 0.5f;
-    const float sy = (srcLuma.y - 1.0f) * 0.5f;
+    const float3 solved = solveRollingShutterAndDistort(lumaDst.x, lumaDst.y, u);
+    if (solved.z < 0.5f ||
+        solved.x < 0.0f || solved.x > float(u.lumaInSize.x) ||
+        solved.y < 0.0f || solved.y > float(u.lumaInSize.y)) {
+        outTex.write(float4(0.5f, 0.5f, 0.0f, 1.0f), gid);
+        return;
+    }
+
+    const float sx = (solved.x - 1.0f) * 0.5f;
+    const float sy = (solved.y - 1.0f) * 0.5f;
 
     const int ix = int(floor(sx));
     const int iy = int(floor(sy));
@@ -151,8 +181,11 @@ kernel void lanczos4_warp_chroma(
     const float fy = sy - float(iy);
 
     float wx[4];
+    float wy[4];
     for (int k = 0; k < 4; ++k) {
-        wx[k] = lanczos2_weight(fx - float(k - 1));
+        const float offset = float(k - 1);
+        wx[k] = lanczos2_weight(fx - offset);
+        wy[k] = lanczos2_weight(fy - offset);
     }
 
     const int maxX = int(u.inSize.x) - 1;
@@ -161,10 +194,10 @@ kernel void lanczos4_warp_chroma(
     float2 sum = float2(0.0f, 0.0f);
     float wSum = 0.0f;
     for (int dy = -1; dy <= 2; ++dy) {
-        const float wy = lanczos2_weight(fy - float(dy));
+        const float wRow = wy[dy + 1];
         const int py = clamp(iy + dy, 0, maxY);
         for (int dx = -1; dx <= 2; ++dx) {
-            const float weight = wx[dx + 1] * wy;
+            const float weight = wx[dx + 1] * wRow;
             const int px = clamp(ix + dx, 0, maxX);
             sum += inTex.read(uint2(px, py)).rg * weight;
             wSum += weight;

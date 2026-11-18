@@ -526,6 +526,32 @@ TrajectoryResult TrajectoryEngine::solve(
         }
     }
 
+    // Separate Swing-Lag Limit (1:1 up to 7 deg, smooth tanh saturation to 11 deg) vs Full Roll Lock (-180..+180 deg)
+    // Prevents perspective w -> 0 / lens fold-over during fast whip-pans with zero distortion on <=7 deg shakes.
+    const double kneeRad = 7.0 * (kPi / 180.0);
+    const double headroomRad = 4.0 * (kPi / 180.0);
+    const Vec3 zAxis(0.0, 0.0, 1.0);
+    for (size_t i = 0; i < n; ++i) {
+        const Quat qCorr = (result.rawFrameQuats[i].conjugate() * result.smoothFrameQuats[i]).normalized();
+        Quat qSwing, qTwist;
+        Quat::decomposeSwingTwist(qCorr, zAxis, qSwing, qTwist);
+
+        if (qSwing.w < 0.0) {
+            qSwing = Quat(-qSwing.w, -qSwing.x, -qSwing.y, -qSwing.z);
+        }
+        const double vNorm = std::sqrt(qSwing.x * qSwing.x + qSwing.y * qSwing.y + qSwing.z * qSwing.z);
+        if (vNorm > 1e-8) {
+            const double swingAngle = 2.0 * std::atan2(vNorm, std::min(1.0, qSwing.w));
+            if (swingAngle > kneeRad) {
+                const double compressedAngle = kneeRad + headroomRad * std::tanh((swingAngle - kneeRad) / headroomRad);
+                const Vec3 axis(qSwing.x / vNorm, qSwing.y / vNorm, qSwing.z / vNorm);
+                qSwing = Quat::fromAxisAngle(axis, compressedAngle);
+                const Quat qCorrLimited = (qSwing * qTwist).normalized();
+                result.smoothFrameQuats[i] = (result.rawFrameQuats[i] * qCorrLimited).normalized();
+            }
+        }
+    }
+
     result.rawAngularAccelRms = computeAngularAccelRms(result.rawFrameQuats, dtF);
     result.smoothAngularAccelRms = computeAngularAccelRms(result.smoothFrameQuats, dtF);
 

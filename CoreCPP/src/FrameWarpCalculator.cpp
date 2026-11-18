@@ -105,12 +105,17 @@ double FrameWarpCalculator::computeRequiredZoom(
             const double u = pt.first;
             const double v = pt.second;
             const double w = static_cast<double>(H[6]) * u + static_cast<double>(H[7]) * v + static_cast<double>(H[8]);
-            if (w <= 1e-4) {
+            if (w <= 0.25) {
                 return false;
             }
             const double us = (static_cast<double>(H[0]) * u + static_cast<double>(H[1]) * v + static_cast<double>(H[2])) / w;
             const double vs = (static_cast<double>(H[3]) * u + static_cast<double>(H[4]) * v + static_cast<double>(H[5])) / w;
             if (us < minValidX || us > maxValidX || vs < minValidY || vs > maxValidY) {
+                return false;
+            }
+            const double xn = (us - cx) / fx;
+            const double yn = (vs - cy) / fy;
+            if ((xn * xn + yn * yn) >= 2.2) {
                 return false;
             }
         }
@@ -122,7 +127,7 @@ double FrameWarpCalculator::computeRequiredZoom(
     }
 
     double lo = 1.0;
-    double hi = 3.0;
+    double hi = 4.0;
     if (!fitsInside(hi)) {
         return hi;
     }
@@ -228,33 +233,56 @@ WarpComputationResult FrameWarpCalculator::computeAllFramesWithRollingShutter(
         }
     }
 
-    // Step 2: Compute minimum safe zoom per frame
+    const bool useRS = rollingShutterCorrection && (std::fabs(profile.readoutTimeSec) > 1e-5) && (traj.frameTimestampsSec.size() == n);
+
+    // Step 2: Compute minimum safe zoom per frame across slice 0, mid, and 31
     std::vector<double> zMin(n, 1.0);
     for (size_t i = 0; i < n; ++i) {
-        const Quat qCorr = (traj.rawFrameQuats[i].conjugate() * adjustedSmooth[i]).normalized();
-        zMin[i] = computeRequiredZoom(
-            qCorr, profile.width, profile.height,
+        const Quat qCorrMid = (traj.rawFrameQuats[i].conjugate() * adjustedSmooth[i]).normalized();
+        double zReq = computeRequiredZoom(
+            qCorrMid, profile.width, profile.height,
             profile.fx, profile.fy, profile.cx, profile.cy, 4.0
         );
+        if (useRS) {
+            const Quat qTop = engine.sampleRawQuaternionAt(traj.frameTimestampsSec[i] - 0.5 * profile.readoutTimeSec);
+            const Quat qBot = engine.sampleRawQuaternionAt(traj.frameTimestampsSec[i] + 0.5 * profile.readoutTimeSec);
+            const Quat qCorrTop = (qTop.conjugate() * adjustedSmooth[i]).normalized();
+            const Quat qCorrBot = (qBot.conjugate() * adjustedSmooth[i]).normalized();
+            zReq = std::max(zReq, computeRequiredZoom(qCorrTop, profile.width, profile.height, profile.fx, profile.fy, profile.cx, profile.cy, 4.0));
+            zReq = std::max(zReq, computeRequiredZoom(qCorrBot, profile.width, profile.height, profile.fx, profile.fy, profile.cx, profile.cy, 4.0));
+        }
+        zMin[i] = zReq;
     }
 
-    // Step 3: Ultra-smooth 3-pass upper-envelope zoom curve (tau_zoom = 1.4s, clamped >= zMin[i])
+    // Step 3: 3-Step Tight-Fit Asymmetric Attack/Release Envelope (minimal crop, 0% black border)
     std::vector<double> zSmooth = zMin;
     if (dynamicZoomEnabled) {
-        const double alphaZoom = std::exp(-dt / 1.4);
-        std::vector<double> zFwd = zMin;
-        std::vector<double> zBwd = zMin;
-        for (int pass = 0; pass < 3; ++pass) {
-            zFwd[0] = std::max(zMin[0], zSmooth[0]);
-            for (size_t i = 1; i < n; ++i) {
-                zFwd[i] = std::max(zMin[i], alphaZoom * zFwd[i - 1] + (1.0 - alphaZoom) * zSmooth[i]);
+        std::vector<double> localMax(n, 1.0);
+        for (size_t i = 0; i < n; ++i) {
+            const size_t lo = static_cast<size_t>(std::max(0, static_cast<int>(i) - 4));
+            const size_t hi = static_cast<size_t>(std::min(static_cast<int>(n) - 1, static_cast<int>(i) + 4));
+            double mx = 1.0;
+            for (size_t k = lo; k <= hi; ++k) {
+                mx = std::max(mx, zMin[k]);
             }
-            zBwd[n - 1] = std::max(zMin[n - 1], zFwd[n - 1]);
-            for (size_t i = n - 1; i > 0; --i) {
-                const size_t idx = i - 1;
-                zBwd[idx] = std::max(zMin[idx], alphaZoom * zBwd[idx + 1] + (1.0 - alphaZoom) * zFwd[idx]);
-            }
-            zSmooth = zBwd;
+            localMax[i] = mx;
+        }
+
+        // Forward pass (Release 0.50s)
+        const double alphaRel = std::exp(-dt / 0.50);
+        std::vector<double> zFwd(n, 1.0);
+        zFwd[0] = localMax[0];
+        for (size_t i = 1; i < n; ++i) {
+            zFwd[i] = std::max(localMax[i], alphaRel * zFwd[i - 1] + (1.0 - alphaRel) * localMax[i]);
+        }
+
+        // Backward pass (Attack 0.40s)
+        const double alphaAtt = std::exp(-dt / 0.40);
+        zSmooth[n - 1] = std::max(zMin[n - 1], zFwd[n - 1]);
+        for (size_t i = n - 1; i > 0; --i) {
+            const size_t idx = i - 1;
+            const double val = alphaAtt * zSmooth[idx + 1] + (1.0 - alphaAtt) * zFwd[idx];
+            zSmooth[idx] = std::max(zMin[idx], val);
         }
     } else {
         double staticMax = 1.0;
@@ -269,8 +297,6 @@ WarpComputationResult FrameWarpCalculator::computeAllFramesWithRollingShutter(
     res.minZoom = 1e9;
     res.maxZoom = 0.0;
     double sumZoom = 0.0;
-
-    const bool useRS = rollingShutterCorrection && (std::fabs(profile.readoutTimeSec) > 1e-5) && (traj.frameTimestampsSec.size() == n);
 
     for (size_t i = 0; i < n; ++i) {
         double zFinal = zSmooth[i];

@@ -213,7 +213,7 @@ final class StabilizeViewController: UIViewController {
         configureSlider(pitchSlider, min: 0.0, max: 1.0, val: 0.65)
         configureSlider(yawSlider, min: 0.0, max: 1.0, val: 0.65)
         configureSlider(rollSlider, min: 0.0, max: 1.0, val: 0.75)
-        configureSlider(zoomSlider, min: 1.05, max: 2.20, val: 1.65)
+        configureSlider(zoomSlider, min: 1.05, max: 2.40, val: 1.95)
         configureSlider(tiltSlider, min: -15.0, max: 15.0, val: 0.0)
         configureSlider(offsetSlider, min: -80.0, max: 80.0, val: 0.0)
 
@@ -355,8 +355,8 @@ final class StabilizeViewController: UIViewController {
         yawSlider.value = 0.85
         rollSlider.value = 0.92
         horizonSwitch.isOn = true
-        unlimitedZoomSwitch.isOn = false
-        zoomSlider.value = 1.60
+        unlimitedZoomSwitch.isOn = true
+        zoomSlider.value = 2.00
         rsSwitch.isOn = true
         dynamicZoomSwitch.isOn = true
         updateSliderLabels()

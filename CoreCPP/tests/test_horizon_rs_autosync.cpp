@@ -736,6 +736,135 @@ void testSignedReadoutDetectionNegative15ms() {
                 syncRes.signedReadoutTimeMs, residualPx);
 }
 
+void testPortraitToLandscape90TransitionUltraGimbal() {
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.width = 1920;
+    hdr.height = 1080;
+    hdr.nominal_fps = 30.0;
+    hdr.lens_fx = 1660.0;
+    hdr.lens_fy = 1660.0;
+    hdr.lens_cx = 960.0;
+    hdr.lens_cy = 540.0;
+
+    // 10s @ 90Hz = 900 IMU samples, 300 frames @ 30fps
+    // 0..3s: Portrait (g_W = (1,0,0)), 3..5s: rotate +90 deg around +Z_cam, 5..10s: Landscape + +-6 deg shake
+    const int nImu = 900;
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    const double rollRate90 = (kPi * 0.5) / 2.0; // +90 deg over 2s
+    const double shakeAmp = 6.0 * (kPi / 180.0);
+    const double wShake = 2.0 * kPi * 4.0;
+
+    double angleZ = 0.0;
+    for (int i = 0; i < nImu; ++i) {
+        const double t = 10.0 + i / 90.0;
+        const double tau = t - 10.0;
+        double wz = 0.0;
+        if (tau >= 3.0 && tau < 5.0) {
+            wz = rollRate90;
+        } else if (tau >= 5.0) {
+            wz = shakeAmp * wShake * std::cos(wShake * (tau - 5.0));
+        }
+        if (i > 0) {
+            angleZ += wz * (1.0 / 90.0);
+        }
+
+        // LandscapeLeft (-y, -x, -z) -> gz_ios = -wz
+        gyro.push_back({t, 0.0, 0.0, -wz});
+
+        // World gravity g_W = (1, 0, 0). In camera rotated by angleZ around +Z: a_cam = R_z(-angleZ)*(1,0,0) = (cos(a), -sin(a), 0)
+        const double axCam = std::cos(angleZ);
+        const double ayCam = -std::sin(angleZ);
+        accel.push_back({t, static_cast<float>(-ayCam), static_cast<float>(-axCam), 0.0f});
+    }
+
+    std::vector<gf::GFFrameRecord> frames;
+    for (int f = 0; f < 300; ++f) {
+        frames.push_back({static_cast<uint32_t>(f), 10.0 + f / 30.0, 0.008f, 100.0f, 0.7f, 0.0152f});
+    }
+
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel);
+
+    gf::StabilizerConfig cfg;
+    cfg.pitchSmoothness = 0.85;
+    cfg.yawSmoothness = 0.85;
+    cfg.rollSmoothness = 0.92;
+    cfg.horizonLockEnabled = true;
+    cfg.horizonLockAmount = 1.0;
+
+    const auto traj = engine.solve(frames, cfg);
+    assert(traj.valid);
+    assert(traj.detectedGravityQuadrantDeg == 90);
+    assert(traj.maxOutputRollErrorDeg < 0.3);
+
+    const auto prof = gf::CalibrationProfile::defaultIPhone5s1080p30();
+    const auto warp = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
+        engine, traj, prof, 30.0, 0.0, true, true
+    );
+    assert(warp.minZoom < 1.10);
+    assert(warp.maxZoom >= 1.75);
+
+    std::printf("Test D (Portrait->Landscape 90deg UltraGimbal -> maxOutRollErr=%.3f deg, Zoom=[%.2f..%.2f]) PASSED.\n",
+                traj.maxOutputRollErrorDeg, warp.minZoom, warp.maxZoom);
+}
+
+void testFastPanSwingLagLimit() {
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.width = 1920;
+    hdr.height = 1080;
+    hdr.nominal_fps = 30.0;
+
+    // 120 deg/s whip-pan around Y_cam for 1.0s
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    const double whipRate = 120.0 * (kPi / 180.0);
+    for (int i = 0; i < 270; ++i) {
+        const double t = 1.0 + i / 90.0;
+        const double wy = (t >= 2.0 && t <= 3.0) ? whipRate : 0.0;
+        gyro.push_back({t, -wy, 0.0, 0.0});
+        accel.push_back({t, -1.0f, 0.0f, 0.0f});
+    }
+    std::vector<gf::GFFrameRecord> frames;
+    for (int f = 0; f < 90; ++f) {
+        frames.push_back({static_cast<uint32_t>(f), 1.0 + f / 30.0, 0.008f, 100.0f, 0.7f, 0.0152f});
+    }
+
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel);
+
+    gf::StabilizerConfig cfg;
+    cfg.pitchSmoothness = 0.90;
+    cfg.yawSmoothness = 0.90;
+    cfg.rollSmoothness = 0.92;
+    cfg.velocityDamping = 0.0; // Stress-test worst-case without pan damping!
+
+    const auto traj = engine.solve(frames, cfg);
+    assert(traj.valid);
+    // Swing-lag limiter must compress Pitch/Yaw lag <= 11.1 deg even with velocityDamping=0
+    assert(traj.maxCorrectionDeg <= 11.1);
+
+    const auto prof = gf::CalibrationProfile::defaultIPhone5s1080p30();
+    const auto warp = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
+        engine, traj, prof, 30.0, 0.0, true, true
+    );
+    // Every frame's 4 corners must have w > 0.25 (zero left-half perspective tearing)
+    const double corners[4][2] = {{0.0, 0.0}, {1919.0, 0.0}, {1919.0, 1079.0}, {0.0, 1079.0}};
+    for (const auto& lut : warp.frameLUTs) {
+        const float* H = lut.sliceH[16];
+        for (int c = 0; c < 4; ++c) {
+            const double w = H[6] * corners[c][0] + H[7] * corners[c][1] + H[8];
+            assert(w > 0.25);
+        }
+    }
+    std::printf("Fast-Pan Swing-Lag Limit (maxCorr=%.2f deg, maxZoom=%.2fx, w>0.25) PASSED.\n",
+                traj.maxCorrectionDeg, warp.maxZoom);
+}
+
 } // namespace
 
 int main() {
@@ -748,5 +877,7 @@ int main() {
     testViolentLateralShakeImmuneHorizonSway();
     testViolentShakeVsSmoothPan();
     testSignedReadoutDetectionNegative15ms();
+    testPortraitToLandscape90TransitionUltraGimbal();
+    testFastPanSwingLagLimit();
     return 0;
 }
