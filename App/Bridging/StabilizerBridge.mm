@@ -125,6 +125,7 @@ struct GFWarpFrameUniformsMetal {
     self = [super init];
     if (self) {
         _detectedOrientationName = @"Landscape (0°)";
+        _gpuMatrixProof = @"";
         _errorMessage = @"";
     }
     return self;
@@ -258,6 +259,17 @@ struct GFWarpFrameUniformsMetal {
         _plan.detectedOrientationName = [NSString stringWithFormat:@"Portrait (%ld°)", (long)videoRotationDegrees];
     } else {
         _plan.detectedOrientationName = [NSString stringWithFormat:@"Landscape (%ld°)", (long)videoRotationDegrees];
+    }
+    if (!_frameLUTs.empty()) {
+        const size_t midIdx = _frameLUTs.size() / 2;
+        const float *m = _frameLUTs[midIdx].sliceH[gf::kRollingShutterSlices / 2];
+        _plan.isIdentityMatrix = (std::fabs(m[0] - 1.0f) < 1e-3f &&
+                                  std::fabs(m[4] - 1.0f) < 1e-3f &&
+                                  std::fabs(m[1]) < 1e-3f &&
+                                  std::fabs(m[3]) < 1e-3f) ? YES : NO;
+        _plan.gpuMatrixProof = [NSString stringWithFormat:
+            @"MidFrame H: diag=(%.3f, %.3f) | rot=(%.3f, %.3f) | inputTilt=%.1f° -> outErr=%.2f°",
+            m[0], m[4], m[1], m[3], traj.maxInputRollDeg, traj.maxOutputRollErrorDeg];
     }
     _plan.width = _profile.width;
     _plan.height = _profile.height;

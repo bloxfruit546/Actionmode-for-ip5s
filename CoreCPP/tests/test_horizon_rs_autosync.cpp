@@ -428,6 +428,110 @@ void testEndToEndPixelStabilizationCentroid() {
     std::printf("End-to-End Pixel Stabilization Centroid (err=%.3f px) PASSED.\n", errPx);
 }
 
+void testEndToEndPixelPortrait90HorizonLock35Deg() {
+    const int w = 320, h = 180;
+    const double fx = 276.67, fy = 276.67, cx = 160.0, cy = 90.0;
+
+    // Portrait 90 deg: +X_pixel is viewer's DOWN, -Y_pixel is viewer's RIGHT.
+    // Camera rolled +35 deg CW around +Z_cam: q_WC = R_z(+35 deg).
+    // World gravity g_W = (1, 0, 0) -> in camera frame: a_cam = R_z(-35) * (1, 0, 0) = (cos35, -sin35, 0)
+    const double rollRad = 35.0 * (kPi / 180.0);
+    const gf::Vec3 aCam(std::cos(rollRad), -std::sin(rollRad), 0.0);
+    const float axIos = static_cast<float>(-aCam.y);
+    const float ayIos = static_cast<float>(-aCam.x);
+    const float azIos = static_cast<float>(-aCam.z);
+
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.width = w;
+    hdr.height = h;
+    hdr.nominal_fps = 30.0;
+    hdr.lens_fx = fx;
+    hdr.lens_fy = fy;
+    hdr.lens_cx = cx;
+    hdr.lens_cy = cy;
+
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    for (int i = 0; i < 90; ++i) {
+        const double t = 1.0 + i / 90.0;
+        gyro.push_back({t, 0.0, 0.0, 0.0});
+        accel.push_back({t, axIos, ayIos, azIos});
+    }
+    std::vector<gf::GFFrameRecord> frames;
+    for (int f = 0; f < 30; ++f) {
+        frames.push_back({static_cast<uint32_t>(f), 1.1 + f / 30.0, 0.008f, 100.0f, 0.7f, 0.0});
+    }
+
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel);
+
+    gf::StabilizerConfig cfg;
+    cfg.pitchSmoothness = 0.5;
+    cfg.yawSmoothness = 0.5;
+    cfg.rollSmoothness = 0.5;
+    cfg.horizonLockEnabled = true;
+    cfg.horizonLockAmount = 1.0;
+    cfg.videoRotationDegrees = 90;
+
+    const auto traj = engine.solve(frames, cfg);
+    assert(traj.valid);
+    assert(traj.maxOutputRollErrorDeg < 0.5);
+
+    gf::CalibrationProfile prof;
+    prof.width = w; prof.height = h; prof.fx = fx; prof.fy = fy; prof.cx = cx; prof.cy = cy; prof.readoutTimeSec = 0.0;
+
+    const auto warp = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
+        engine, traj, prof, 30.0, 0.0, false, true
+    );
+
+    // P_world = R_z(+35) * P_cam -> x_world = x_cam * cos(35) - y_cam * sin(35)
+    std::vector<uint8_t> srcImg(static_cast<size_t>(w * h), 0);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const double xc = (x - cx) / fx;
+            const double yc = (y - cy) / fy;
+            const double xWorld = xc * std::cos(rollRad) - yc * std::sin(rollRad);
+            srcImg[static_cast<size_t>(y * w + x)] = (xWorld < 0.0) ? 240 : 20;
+        }
+    }
+
+    const float* H = warp.frameLUTs[15].sliceH[0];
+    std::vector<uint8_t> dstImg(static_cast<size_t>(w * h), 0);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            const double pw = H[6] * x + H[7] * y + H[8];
+            const double sx = (H[0] * x + H[1] * y + H[2]) / pw;
+            const double sy = (H[3] * x + H[4] * y + H[5]) / pw;
+            dstImg[static_cast<size_t>(y * w + x)] = bilinearSample(srcImg, w, h, sx, sy);
+        }
+    }
+
+    // In Portrait 90 deg, horizontal horizon in display corresponds to vertical line (constant x) in pixel buffer
+    double sumY = 0.0, sumX = 0.0, sumYY = 0.0, sumYX = 0.0;
+    int count = 0;
+    for (int y = 40; y <= 140; y += 2) {
+        for (int x = 20; x < w - 20; ++x) {
+            const int vLeft = dstImg[static_cast<size_t>(y * w + x)];
+            const int vRight = dstImg[static_cast<size_t>(y * w + x + 1)];
+            if (vLeft > 130 && vRight <= 130) {
+                sumY += y;
+                sumX += x + 0.5;
+                sumYY += y * y;
+                sumYX += y * (x + 0.5);
+                ++count;
+                break;
+            }
+        }
+    }
+    assert(count > 20);
+    const double slope = (count * sumYX - sumY * sumX) / (count * sumYY - sumY * sumY);
+    const double outAngleDeg = std::atan(slope) * (180.0 / kPi);
+    assert(std::fabs(outAngleDeg) < 0.5);
+    std::printf("End-to-End Pixel Portrait 90 Horizon Lock (35 deg -> %.3f deg) PASSED.\n", outAngleDeg);
+}
+
 } // namespace
 
 int main() {
@@ -436,5 +540,6 @@ int main() {
     testOpticalSyncOffsetAndAxisDetection();
     testEndToEndPixelHorizonLock30Deg();
     testEndToEndPixelStabilizationCentroid();
+    testEndToEndPixelPortrait90HorizonLock35Deg();
     return 0;
 }

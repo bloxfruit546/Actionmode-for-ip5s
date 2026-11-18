@@ -258,6 +258,8 @@ final class OfflineRenderPipeline {
                 }
                 writer.startSession(atSourceTime: .zero)
 
+                FileLogger.shared.log("Video preferredTransform rotation = \(rotDeg) deg | Applied AxisPreset = \(config.axisPresetIndex) | Applied Offset = \(String(format: "%.1f", config.timeOffsetMs)) ms")
+                FileLogger.shared.log(plan.gpuMatrixProof)
                 FileLogger.shared.log("OfflineRender STARTED: \(take.uuid) (\(width)x\(height), ~\(totalFrames) frames, RS=\(config.rollingShutterCorrection), HL=\(config.horizonLockEnabled))")
 
                 let videoRenderQueue = DispatchQueue(label: "com.gyrostab5s.render.video", qos: .userInitiated)

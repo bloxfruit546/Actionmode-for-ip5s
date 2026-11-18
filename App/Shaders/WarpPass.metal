@@ -96,7 +96,7 @@ kernel void lanczos4_warp_luma(
         return;
     }
 
-    const float2 src = solveRollingShutterAndDistort(float(gid.x), float(gid.y), u);
+    const float2 src = solveRollingShutterAndDistort(float(gid.x) + 0.5f, float(gid.y) + 0.5f, u) - 0.5f;
     const int ix = int(floor(src.x));
     const int iy = int(floor(src.y));
     const float fx = src.x - float(ix);
@@ -137,10 +137,10 @@ kernel void lanczos4_warp_chroma(
         return;
     }
 
-    const float2 lumaDst = float2(gid) * 2.0f + 0.5f;
+    const float2 lumaDst = float2(gid) * 2.0f + 1.0f;
     const float2 srcLuma = solveRollingShutterAndDistort(lumaDst.x, lumaDst.y, u);
-    const float sx = (srcLuma.x - 0.5f) * 0.5f;
-    const float sy = (srcLuma.y - 0.5f) * 0.5f;
+    const float sx = (srcLuma.x - 1.0f) * 0.5f;
+    const float sy = (srcLuma.y - 1.0f) * 0.5f;
 
     const int ix = int(floor(sx));
     const int iy = int(floor(sy));

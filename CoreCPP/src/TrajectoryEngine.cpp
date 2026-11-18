@@ -118,7 +118,8 @@ double computeAlphaForAxis(double smoothness, double smoothOmega, double velocit
     if (s <= 1e-4) {
         return 0.0;
     }
-    const double tauBase = 0.02 + s * 0.88;
+    // At smoothness = 0.65, tauBase ~= 0.85s for stronger gimbal stabilization
+    const double tauBase = 0.02 + s * 1.28;
     const double ratio = smoothOmega / 0.55;
     const double tauEff = tauBase / (1.0 + velocityDamping * ratio * ratio);
     return std::exp(-dtF / std::max(tauEff, 1e-4));

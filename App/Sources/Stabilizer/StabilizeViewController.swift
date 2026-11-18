@@ -79,6 +79,16 @@ final class StabilizeViewController: UIViewController {
         return l
     }()
 
+    private let gpuProofLabel: UILabel = {
+        let l = UILabel()
+        l.translatesAutoresizingMaskIntoConstraints = false
+        l.font = UIFont(name: "Menlo-Bold", size: 11) ?? UIFont.systemFont(ofSize: 11, weight: .bold)
+        l.textColor = UIColor(red: 1.0, green: 0.88, blue: 0.20, alpha: 1.0)
+        l.numberOfLines = 0
+        l.text = "GPU Matrix Proof: Pending..."
+        return l
+    }()
+
     private let progressView: UIProgressView = {
         let pv = UIProgressView(progressViewStyle: .default)
         pv.translatesAutoresizingMaskIntoConstraints = false
@@ -190,7 +200,7 @@ final class StabilizeViewController: UIViewController {
         configureSlider(pitchSlider, min: 0.0, max: 1.0, val: 0.65)
         configureSlider(yawSlider, min: 0.0, max: 1.0, val: 0.65)
         configureSlider(rollSlider, min: 0.0, max: 1.0, val: 0.75)
-        configureSlider(zoomSlider, min: 1.05, max: 1.60, val: 1.25)
+        configureSlider(zoomSlider, min: 1.05, max: 1.65, val: 1.35)
         configureSlider(tiltSlider, min: -15.0, max: 15.0, val: 0.0)
         configureSlider(offsetSlider, min: -80.0, max: 80.0, val: 0.0)
 
@@ -203,7 +213,7 @@ final class StabilizeViewController: UIViewController {
         dynamicZoomSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
 
         horizonSwitch.translatesAutoresizingMaskIntoConstraints = false
-        horizonSwitch.isOn = false
+        horizonSwitch.isOn = true
         horizonSwitch.addTarget(self, action: #selector(handleHorizonToggled), for: .valueChanged)
 
         rsSwitch.translatesAutoresizingMaskIntoConstraints = false
@@ -264,6 +274,7 @@ final class StabilizeViewController: UIViewController {
             offsetSlider,
             previewButton,
             previewInfoLabel,
+            gpuProofLabel,
             progressView,
             statusLabel,
             renderButton,
@@ -361,6 +372,8 @@ final class StabilizeViewController: UIViewController {
     @objc private func handleAutoSync() {
         autoSyncButton.isEnabled = false
         autoSyncButton.alpha = 0.6
+        renderButton.isEnabled = false
+        renderButton.alpha = 0.6
         autoSyncLabel.textColor = UIColor(white: 0.9, alpha: 1.0)
         autoSyncLabel.text = "Running Optical Flow Auto-Sync & Axis Verification..."
 
@@ -368,6 +381,8 @@ final class StabilizeViewController: UIViewController {
             guard let self = self else { return }
             self.autoSyncButton.isEnabled = true
             self.autoSyncButton.alpha = 1.0
+            self.renderButton.isEnabled = true
+            self.renderButton.alpha = 1.0
 
             switch result {
             case .success(let res):
@@ -400,9 +415,19 @@ final class StabilizeViewController: UIViewController {
                 plan.maxInputRollDeg, plan.maxOutputRollErrorDeg,
                 plan.minZoom, plan.maxZoom, plan.avgZoom
             )
+            if plan.isIdentityMatrix {
+                gpuProofLabel.textColor = UIColor(red: 1.0, green: 0.35, blue: 0.35, alpha: 1.0)
+                gpuProofLabel.text = "WARN (Identity Matrix!): \(plan.gpuMatrixProof)"
+            } else {
+                gpuProofLabel.textColor = UIColor(red: 1.0, green: 0.88, blue: 0.20, alpha: 1.0)
+                gpuProofLabel.text = plan.gpuMatrixProof
+            }
+            FileLogger.shared.log("Preview: \(plan.gpuMatrixProof) | Axis=\(detectedAxisPresetIndex) | Offset=\(String(format: "%.1f", cfg.timeOffsetMs))ms")
         } else {
             previewInfoLabel.textColor = UIColor(red: 1.0, green: 0.45, blue: 0.45, alpha: 1.0)
             previewInfoLabel.text = "Failed to compute trajectory preview."
+            gpuProofLabel.textColor = UIColor(red: 1.0, green: 0.35, blue: 0.35, alpha: 1.0)
+            gpuProofLabel.text = "GPU Matrix Proof: Invalid Plan"
         }
     }
 
