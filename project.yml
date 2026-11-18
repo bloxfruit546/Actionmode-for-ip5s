@@ -36,8 +36,11 @@ targets:
         CODE_SIGN_IDENTITY: ""
     dependencies:
       - sdk: AVFoundation.framework
+      - sdk: AVKit.framework
+      - sdk: CoreMedia.framework
       - sdk: CoreMotion.framework
       - sdk: CoreVideo.framework
+      - sdk: ImageIO.framework
       - sdk: Metal.framework
       - sdk: Photos.framework
       - sdk: UIKit.framework
