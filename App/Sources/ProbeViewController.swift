@@ -71,7 +71,7 @@ final class ProbeViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        title = "GyroStabilizer5s Probe"
+        navigationItem.title = "GyroStabilizer5s Probe"
         view.backgroundColor = UIColor(red: 0.09, green: 0.10, blue: 0.12, alpha: 1.0)
 
         setupLayout()

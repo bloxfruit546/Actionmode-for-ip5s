@@ -7,6 +7,12 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 add_library(gf_core STATIC
     CoreCPP/src/Quaternion.cpp
+    CoreCPP/src/SidecarIO.cpp
+    CoreCPP/src/CalibrationProfile.cpp
+    CoreCPP/src/TrajectoryEngine.cpp
+    CoreCPP/src/FrameWarpCalculator.cpp
+    CoreCPP/src/OpticalSync.cpp
+    CoreCPP/src/VirtualGyroEngine.cpp
 )
 
 target_include_directories(gf_core PUBLIC
@@ -22,8 +28,25 @@ endif()
 add_executable(gf_core_tests
     CoreCPP/tests/test_math.cpp
 )
-
 target_link_libraries(gf_core_tests PRIVATE gf_core)
+
+add_executable(gf_sidecar_calib_tests
+    CoreCPP/tests/test_sidecar_and_calib.cpp
+)
+target_link_libraries(gf_sidecar_calib_tests PRIVATE gf_core)
+
+add_executable(gf_stabilizer_tests
+    CoreCPP/tests/test_stabilizer.cpp
+)
+target_link_libraries(gf_stabilizer_tests PRIVATE gf_core)
+
+add_executable(gf_horizon_rs_autosync_tests
+    CoreCPP/tests/test_horizon_rs_autosync.cpp
+)
+target_link_libraries(gf_horizon_rs_autosync_tests PRIVATE gf_core)
 
 enable_testing()
 add_test(NAME gf_core_math_tests COMMAND gf_core_tests)
+add_test(NAME gf_sidecar_calib_tests COMMAND gf_sidecar_calib_tests)
+add_test(NAME gf_stabilizer_tests COMMAND gf_stabilizer_tests)
+add_test(NAME gf_horizon_rs_autosync_tests COMMAND gf_horizon_rs_autosync_tests)

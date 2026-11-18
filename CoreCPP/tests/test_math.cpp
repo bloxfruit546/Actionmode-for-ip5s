@@ -86,9 +86,11 @@ void testSwingTwistDecomposition() {
 }
 
 void testSidecarStructSizes() {
-    assert(sizeof(gf::GFHeader) == 69);
-    assert(sizeof(gf::GFImuSample) == 44);
-    assert(sizeof(gf::GFFrameSample) == 20);
+    assert(sizeof(gf::GFFileHeader) == 168);
+    assert(sizeof(gf::GFGyroRecord) == 32);
+    assert(sizeof(gf::GFAccelRecord) == 20);
+    assert(sizeof(gf::GFFrameRecord) == 28);
+    assert(sizeof(gf::GFFooterRecord) == 32);
 }
 
 } // namespace
