@@ -19,6 +19,7 @@ struct StabilizeExportConfig: Codable {
     let hasReadoutOverride: Bool
     let signedReadoutTimeMs: Double
     let focalScaleOverride: Double
+    let rollGyroScaleOverride: Double
     let hybridResidualEnabled: Bool
     let motoActionMode: Bool
     let edgeFillMode: Int
@@ -42,6 +43,7 @@ struct StabilizeExportConfig: Codable {
         hasReadoutOverride: Bool,
         signedReadoutTimeMs: Double,
         focalScaleOverride: Double,
+        rollGyroScaleOverride: Double = 1.0,
         hybridResidualEnabled: Bool = true,
         motoActionMode: Bool = false,
         edgeFillMode: Int = 0,
@@ -64,6 +66,7 @@ struct StabilizeExportConfig: Codable {
         self.hasReadoutOverride = hasReadoutOverride
         self.signedReadoutTimeMs = signedReadoutTimeMs
         self.focalScaleOverride = focalScaleOverride
+        self.rollGyroScaleOverride = rollGyroScaleOverride
         self.hybridResidualEnabled = hybridResidualEnabled
         self.motoActionMode = motoActionMode
         self.edgeFillMode = edgeFillMode
@@ -89,6 +92,7 @@ struct StabilizeExportConfig: Codable {
         hasReadoutOverride = try c.decode(Bool.self, forKey: .hasReadoutOverride)
         signedReadoutTimeMs = try c.decode(Double.self, forKey: .signedReadoutTimeMs)
         focalScaleOverride = try c.decode(Double.self, forKey: .focalScaleOverride)
+        rollGyroScaleOverride = (try? c.decodeIfPresent(Double.self, forKey: .rollGyroScaleOverride)) ?? 1.0
         hybridResidualEnabled = (try? c.decodeIfPresent(Bool.self, forKey: .hybridResidualEnabled)) ?? true
         motoActionMode = (try? c.decodeIfPresent(Bool.self, forKey: .motoActionMode)) ?? false
         edgeFillMode = (try? c.decodeIfPresent(Int.self, forKey: .edgeFillMode)) ?? 0
@@ -673,6 +677,7 @@ final class OfflineRenderPipeline {
             hasReadoutOverride: config.hasReadoutOverride,
             signedReadoutTimeMs: config.signedReadoutTimeMs,
             focalScaleOverride: config.focalScaleOverride,
+            rollGyroScaleOverride: config.rollGyroScaleOverride,
             motoActionMode: config.motoActionMode,
             edgeFillMode: config.edgeFillMode,
             fovScaleBoost: config.fovScaleBoost,

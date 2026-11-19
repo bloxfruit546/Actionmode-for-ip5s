@@ -10,6 +10,7 @@ final class StabilizeViewController: UIViewController {
     private var hasReadoutOverride: Bool = false
     private var detectedSignedReadoutMs: Double = 15.2
     private var detectedFocalScale: Double = 1.0
+    private var detectedRollGyroScale: Double = 1.0
 
     private let scrollView: UIScrollView = {
         let sv = UIScrollView()
@@ -473,6 +474,7 @@ final class StabilizeViewController: UIViewController {
             hasReadoutOverride: hasReadoutOverride,
             signedReadoutTimeMs: detectedSignedReadoutMs,
             focalScaleOverride: detectedFocalScale,
+            rollGyroScaleOverride: detectedRollGyroScale,
             hybridResidualEnabled: hybridResidualSwitch.isOn,
             motoActionMode: motoActionSwitch.isOn,
             edgeFillMode: edgeFillMode,
@@ -626,6 +628,7 @@ final class StabilizeViewController: UIViewController {
                     self.hasReadoutOverride = res.hasReadoutEstimate
                     self.detectedSignedReadoutMs = res.signedReadoutTimeMs
                     self.detectedFocalScale = res.hasFocalScaleEstimate ? res.effectiveFocalScale : 1.0
+                    self.detectedRollGyroScale = res.hasRollScaleEstimate ? res.rollGyroScale : 1.0
                     self.offsetSlider.value = Float(res.bestOffsetMs)
                     self.updateSliderLabels()
                     self.autoSyncLabel.textColor = UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0)

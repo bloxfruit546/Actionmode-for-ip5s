@@ -272,35 +272,50 @@ WarpComputationResult FrameWarpCalculator::computeAllFramesWithRollingShutter(
         zMin[i] = zReq;
     }
 
-    // Step 3: 3-Step Tight-Fit Asymmetric Attack/Release Envelope (minimal crop, 0% black border)
+    // Step 3: Tight Anti-Pumping Dynamic Zoom Ramp (Finite 0.18s Hermite Lookahead + 0.28s Release + 0.03x Deadband)
+    // Eliminates early zoom bleed during stationary intro while guaranteeing 0% black borders.
     std::vector<double> zSmooth = zMin;
     if (dynamicZoomEnabled) {
-        std::vector<double> localMax(n, 1.0);
+        const double effFps = (nominalFps > 1.0) ? nominalFps : 30.0;
+        const int lookaheadFrames = std::max(2, static_cast<int>(std::round(0.18 * effFps)));
+        const int releaseFrames = std::max(3, static_cast<int>(std::round(0.28 * effFps)));
+
+        std::vector<double> zEnv = zMin;
         for (size_t i = 0; i < n; ++i) {
-            const size_t lo = static_cast<size_t>(std::max(0, static_cast<int>(i) - 4));
-            const size_t hi = static_cast<size_t>(std::min(static_cast<int>(n) - 1, static_cast<int>(i) + 4));
-            double mx = 1.0;
-            for (size_t k = lo; k <= hi; ++k) {
-                mx = std::max(mx, zMin[k]);
+            const int kLo = std::max(0, static_cast<int>(i) - releaseFrames);
+            const int kHi = std::min(static_cast<int>(n) - 1, static_cast<int>(i) + lookaheadFrames);
+            double zMax = zMin[i];
+            for (int k = kLo; k <= kHi; ++k) {
+                if (k == static_cast<int>(i)) continue;
+                const double dist = std::fabs(static_cast<double>(k - static_cast<int>(i)));
+                const double span = (k > static_cast<int>(i))
+                    ? static_cast<double>(lookaheadFrames + 1)
+                    : static_cast<double>(releaseFrames + 1);
+                const double u = std::min(1.0, dist / span);
+                const double w = 1.0 - (u * u * (3.0 - 2.0 * u)); // Cubic Hermite smoothstep decay
+                const double cand = 1.0 + w * (zMin[static_cast<size_t>(k)] - 1.0);
+                zMax = std::max(zMax, cand);
             }
-            localMax[i] = mx;
+            zEnv[i] = zMax;
         }
 
-        // Forward pass (Release 0.50s)
-        const double alphaRel = std::exp(-dt / 0.50);
-        std::vector<double> zFwd(n, 1.0);
-        zFwd[0] = localMax[0];
+        // 0.03x hysteresis deadband prevents micro-breathing on small fluctuations
+        double zHold = zEnv[0];
+        std::vector<double> zDead(n, zHold);
         for (size_t i = 1; i < n; ++i) {
-            zFwd[i] = std::max(localMax[i], alphaRel * zFwd[i - 1] + (1.0 - alphaRel) * localMax[i]);
+            if (zEnv[i] > zHold) {
+                zHold = zEnv[i];
+            } else if (zEnv[i] < zHold - 0.03) {
+                zHold = zEnv[i] + 0.03;
+            }
+            zDead[i] = std::max(zMin[i], zHold);
         }
 
-        // Backward pass (Attack 0.40s)
-        const double alphaAtt = std::exp(-dt / 0.40);
-        zSmooth[n - 1] = std::max(zMin[n - 1], zFwd[n - 1]);
-        for (size_t i = n - 1; i > 0; --i) {
-            const size_t idx = i - 1;
-            const double val = alphaAtt * zSmooth[idx + 1] + (1.0 - alphaAtt) * zFwd[idx];
-            zSmooth[idx] = std::max(zMin[idx], val);
+        // Light 3-tap C1 polish strictly >= zMin[i]
+        zSmooth = zDead;
+        for (size_t i = 1; i + 1 < n; ++i) {
+            const double val = 0.25 * zDead[i - 1] + 0.50 * zDead[i] + 0.25 * zDead[i + 1];
+            zSmooth[i] = std::max(zMin[i], val);
         }
     } else {
         double staticMax = 1.0;

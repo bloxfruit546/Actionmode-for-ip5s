@@ -9,8 +9,8 @@ CalibrationProfile CalibrationProfile::defaultIPhone5s1080p30() {
     CalibrationProfile p;
     p.width = 1920;
     p.height = 1080;
-    p.fx = 1660.0;
-    p.fy = 1660.0;
+    p.fx = 1815.0;
+    p.fy = 1815.0;
     p.cx = 960.0;
     p.cy = 540.0;
     p.k1 = 0.012;
@@ -25,8 +25,8 @@ CalibrationProfile CalibrationProfile::defaultIPhone5s720p120() {
     CalibrationProfile p;
     p.width = 1280;
     p.height = 720;
-    p.fx = 1106.67;
-    p.fy = 1106.67;
+    p.fx = 1210.0;
+    p.fy = 1210.0;
     p.cx = 640.0;
     p.cy = 360.0;
     p.k1 = 0.012;

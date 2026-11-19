@@ -28,6 +28,8 @@ struct OpticalSyncResult {
     bool hasReadoutEstimate = false;
     double effectiveFocalScale = 1.0;
     bool hasFocalScaleEstimate = false;
+    double rollGyroScale = 1.0;
+    bool hasRollScaleEstimate = false;
     std::string diagnosticMessage;
 };
 

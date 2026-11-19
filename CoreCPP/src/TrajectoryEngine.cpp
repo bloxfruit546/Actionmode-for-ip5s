@@ -242,7 +242,8 @@ void TrajectoryEngine::setImuData(
     const std::vector<GFGyroRecord>& gyroRecords,
     const std::vector<GFAccelRecord>& accelRecords,
     const double* customAxisMatrix,
-    bool motoActionMode
+    bool motoActionMode,
+    double rollGyroScale
 ) {
     integratedSamples_.clear();
     nominalFps_ = (header.nominal_fps > 1.0) ? header.nominal_fps : 30.0;
@@ -279,11 +280,14 @@ void TrajectoryEngine::setImuData(
     std::vector<Quat> qPureGyro(nGyro, Quat::identity());
     std::vector<Vec3> omegaCamArr(nGyro);
 
+    const double clampedRollScale = (rollGyroScale >= 0.92 && rollGyroScale <= 1.08) ? rollGyroScale : 1.0;
     double dtSum = 0.0;
     for (size_t i = 0; i < nGyro; ++i) {
         const auto& g = dedupGyro[i];
         const Vec3 rawOmegaIos(g.gx - biasIos.x, g.gy - biasIos.y, g.gz - biasIos.z);
-        omegaCamArr[i] = applyAxisMatrix(M, rawOmegaIos);
+        Vec3 wCam = applyAxisMatrix(M, rawOmegaIos);
+        wCam.z *= clampedRollScale;
+        omegaCamArr[i] = wCam;
         if (i > 0) {
             dtSum += std::min(0.1, std::max(1e-6, g.timestamp_sec - dedupGyro[i - 1].timestamp_sec));
         }
@@ -362,7 +366,8 @@ void TrajectoryEngine::setImuData(
             }
 
             const double magDev = std::fabs(aNorm - 1.0);
-            double w = motoActionMode ? 1e-5 : 0.001;
+            const double omegaMag = omegaCamArr[gIdx].norm();
+            double w = motoActionMode ? 1e-5 : 1e-4;
             const double maxMagDev = motoActionMode ? 0.05 : 0.08;
             const double maxJerk = motoActionMode ? 2.0 : 4.0;
             bool cornering = false;
@@ -373,10 +378,13 @@ void TrajectoryEngine::setImuData(
                     cornering = true;
                 }
             }
-            if (!cornering && magDev <= maxMagDev && jerk <= maxJerk) {
+            if (!cornering && omegaMag < 0.20 && magDev < 0.04 && jerk < 1.0) {
+                // Static anchor / held-tilt settle: fast gravity convergence (tau_eff ~ 0.20s)
+                w = 15.0;
+            } else if (!cornering && omegaMag <= 0.50 && magDev <= maxMagDev && jerk <= maxJerk) {
                 const double wMag = (magDev <= 0.03) ? 1.0 : (1.0 - (magDev - 0.03) / (maxMagDev - 0.03));
                 const double wJerk = (jerk <= 1.2) ? 1.0 : (1.0 - (jerk - 1.2) / (maxJerk - 1.2));
-                w = std::max(motoActionMode ? 1e-5 : 0.001, wMag * wJerk);
+                w = std::max(motoActionMode ? 1e-5 : 1e-4, wMag * wJerk);
             }
             accWeight[k] = w;
             gInertialMeas[k] = (aNorm > 1e-4) ? qPureGyro[gIdx].rotateVector(aCam * (1.0 / aNorm)) : Vec3(0.0, 1.0, 0.0);
@@ -446,7 +454,8 @@ void TrajectoryEngine::setImuData(
                 if (accWeight[aIdx] > minMahonyWeight && std::fabs(sortedAccel[aIdx].timestamp_sec - tG) < 0.05) {
                     const Vec3 aCam = applyAxisMatrix(M, Vec3(sortedAccel[aIdx].ax, sortedAccel[aIdx].ay, sortedAccel[aIdx].az)).normalized();
                     const Vec3 gEst = q.conjugate().rotateVector(gSmooth[aIdx]);
-                    feedback = aCam.cross(gEst) * (kpMahony * accWeight[aIdx]);
+                    const double mahonyW = std::min(2.5, accWeight[aIdx]);
+                    feedback = aCam.cross(gEst) * (kpMahony * mahonyW);
                 }
                 const Vec3& w0 = omegaCamArr[(i >= 2) ? (i - 2) : 0];
                 const Vec3& w1 = omegaCamArr[i - 1];
@@ -564,7 +573,10 @@ TrajectoryResult TrajectoryEngine::solve(
     std::vector<Vec3> frameGravityW(n, initGravityCam_);
     const double offsetSec = config.timeOffsetMs * 0.001;
     for (size_t i = 0; i < n; ++i) {
-        const double tMid = frames[i].pts_sec - 0.5 * static_cast<double>(frames[i].exposure_duration_sec) + offsetSec;
+        const double tMid = frames[i].pts_sec
+            + 0.5 * static_cast<double>(frames[i].exposure_duration_sec)
+            + 0.5 * static_cast<double>(frames[i].rolling_shutter_sec)
+            + offsetSec;
         result.frameTimestampsSec[i] = tMid;
         result.rawFrameQuats[i] = sampleRawQuaternionAt(tMid);
         frameGravityW[i] = sampleGravityWorldAt(tMid);

@@ -104,15 +104,22 @@ struct GFHistSlot {
         return out;
     }
 
-    // Align OpticalFlowFrame timestamps with sidecar frame PTS if needed
+    // Align OpticalFlowFrame timestamps with exact exposure+readout center (unified with TrajectoryEngine)
     const size_t count = std::min(_frames.size(), scFrames.size());
     if (count > 0 && !_frames.empty()) {
-        // Use sidecar's Mach-domain PTS when frame count matches or offset from start
-        const double pts0 = scFrames[0].pts_sec;
+        const double pts0 = scFrames[0].pts_sec
+            + 0.5 * static_cast<double>(scFrames[0].exposure_duration_sec)
+            + 0.5 * static_cast<double>(scFrames[0].rolling_shutter_sec);
         const double vid0 = _frames[0].timestampSec;
         const double delta = pts0 - vid0;
-        for (auto &f : _frames) {
-            f.timestampSec += delta;
+        for (size_t i = 0; i < _frames.size(); ++i) {
+            if (i < scFrames.size()) {
+                _frames[i].timestampSec = scFrames[i].pts_sec
+                    + 0.5 * static_cast<double>(scFrames[i].exposure_duration_sec)
+                    + 0.5 * static_cast<double>(scFrames[i].rolling_shutter_sec);
+            } else {
+                _frames[i].timestampSec += delta;
+            }
         }
     }
 
@@ -126,6 +133,8 @@ struct GFHistSlot {
     out.hasReadoutEstimate = res.hasReadoutEstimate ? YES : NO;
     out.effectiveFocalScale = res.effectiveFocalScale;
     out.hasFocalScaleEstimate = res.hasFocalScaleEstimate ? YES : NO;
+    out.rollGyroScale = res.rollGyroScale;
+    out.hasRollScaleEstimate = res.hasRollScaleEstimate ? YES : NO;
     out.diagnosticMessage = [NSString stringWithUTF8String:res.diagnosticMessage.c_str()] ?: @"";
     return out;
 }
@@ -207,6 +216,7 @@ struct GFHistSlot {
                        hasReadoutOverride:(BOOL)hasReadoutOverride
                       signedReadoutTimeMs:(double)signedReadoutTimeMs
                        focalScaleOverride:(double)focalScaleOverride
+                       rollGyroScaleOverride:(double)rollGyroScaleOverride
                            motoActionMode:(BOOL)motoActionMode
                              edgeFillMode:(NSInteger)edgeFillMode
                             fovScaleBoost:(double)fovScaleBoost
@@ -237,7 +247,7 @@ struct GFHistSlot {
         customAxis = presets[static_cast<size_t>(axisPresetIndex)].m;
     }
 
-    _engine.setImuData(hdr, gyro, accel, customAxis, motoActionMode ? true : false);
+    _engine.setImuData(hdr, gyro, accel, customAxis, motoActionMode ? true : false, rollGyroScaleOverride);
 
     _cfg = gf::StabilizerConfig{};
     _cfg.pitchSmoothness = pitchSmoothness;
@@ -276,10 +286,17 @@ struct GFHistSlot {
         _profile.p1 = hdr.dist_p1;
         _profile.p2 = hdr.dist_p2;
         _profile.readoutTimeSec = hdr.readout_time_sec;
-        // Upgrade legacy over-strong Phase 2/3/4 default distortion coefficients
+        // Upgrade legacy over-strong Phase 2/3/4 default distortion coefficients & 1660px -> 1815px video FOV
         if (std::fabs(_profile.k1 - 0.042) < 1e-4 && std::fabs(_profile.k2 + 0.115) < 1e-4) {
             _profile.k1 = 0.012;
             _profile.k2 = -0.022;
+        }
+        if (std::fabs(_profile.fx - 1660.0) < 2.0 && _profile.width >= 1900) {
+            _profile.fx = 1815.0;
+            _profile.fy = 1815.0;
+        } else if (std::fabs(_profile.fx - 1106.67) < 2.0 && _profile.width == 1280) {
+            _profile.fx = 1210.0;
+            _profile.fy = 1210.0;
         }
     }
     if (hasReadoutOverride) {
@@ -580,7 +597,8 @@ struct GFHistSlot {
         }
     }
 
-    lumaU.histGains = simd_make_float4(gains[0], gains[1], gains[2], 1.0f);
+    const float readoutAxis = (srcH > srcW) ? 1.0f : 0.0f;
+    lumaU.histGains = simd_make_float4(gains[0], gains[1], gains[2], readoutAxis);
     lumaU.polishParams = simd_make_float4((float)(int)_edgeFillMode, (float)_sharpenStrength, lut.zoomUsed, (float)activeHistCount);
     lumaU.outSize = simd_make_uint2((uint32_t)dstW, (uint32_t)dstH);
     lumaU.inSize = simd_make_uint2((uint32_t)srcW, (uint32_t)srcH);

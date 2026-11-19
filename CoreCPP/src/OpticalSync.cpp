@@ -357,8 +357,17 @@ OpticalSyncResult OpticalSync::solveSyncAndAxes(
 
     const double baseW = (header.width > 0) ? static_cast<double>(header.width) : 1920.0;
     const double scale = static_cast<double>(frames[0].width) / baseW;
-    const double fx = ((header.lens_fx > 10.0) ? header.lens_fx : 1660.0) * scale;
-    const double fy = ((header.lens_fy > 10.0) ? header.lens_fy : 1660.0) * scale;
+    double rawFx = (header.lens_fx > 10.0) ? header.lens_fx : 1815.0;
+    double rawFy = (header.lens_fy > 10.0) ? header.lens_fy : 1815.0;
+    if (std::fabs(rawFx - 1660.0) < 2.0 && header.width >= 1900) {
+        rawFx = 1815.0;
+        rawFy = 1815.0;
+    } else if (std::fabs(rawFx - 1106.67) < 2.0 && header.width == 1280) {
+        rawFx = 1210.0;
+        rawFy = 1210.0;
+    }
+    const double fx = rawFx * scale;
+    const double fy = rawFy * scale;
     const double cx = ((header.lens_cx > 10.0) ? header.lens_cx : 960.0) * scale;
     const double cy = ((header.lens_cy > 10.0) ? header.lens_cy : 540.0) * scale;
 
@@ -437,7 +446,12 @@ OpticalSyncResult OpticalSync::solveSyncAndAxes(
         double dotSum = 0.0;
         double visNormSq = 0.0;
         double imuNormSq = 0.0;
-        for (const auto& vs : visSamples) {
+        double dDotSum = 0.0;
+        double dVisNormSq = 0.0;
+        double dImuNormSq = 0.0;
+        double prevIx = 0.0, prevIy = 0.0, prevIz = 0.0;
+        for (size_t k = 0; k < visSamples.size(); ++k) {
+            const auto& vs = visSamples[k];
             const SampledGyro raw = sampleGyroAt(sortedGyro, vs.tMid + offSec);
             const double gx = raw.gx - header.gyro_bias_x;
             const double gy = raw.gy - header.gyro_bias_y;
@@ -448,9 +462,25 @@ OpticalSyncResult OpticalSync::solveSyncAndAxes(
             dotSum += vs.wx * ix + vs.wy * iy + vs.wz * iz;
             visNormSq += vs.wx * vs.wx + vs.wy * vs.wy + vs.wz * vs.wz;
             imuNormSq += ix * ix + iy * iy + iz * iz;
+            if (k > 0) {
+                const auto& prevVs = visSamples[k - 1];
+                const double dvx = vs.wx - prevVs.wx;
+                const double dvy = vs.wy - prevVs.wy;
+                const double dvz = vs.wz - prevVs.wz;
+                const double dix = ix - prevIx;
+                const double diy = iy - prevIy;
+                const double diz = iz - prevIz;
+                dDotSum += dvx * dix + dvy * diy + dvz * diz;
+                dVisNormSq += dvx * dvx + dvy * dvy + dvz * dvz;
+                dImuNormSq += dix * dix + diy * diy + diz * diz;
+            }
+            prevIx = ix; prevIy = iy; prevIz = iz;
         }
         const double denom = std::sqrt(visNormSq * imuNormSq);
-        return (denom > 1e-9) ? (dotSum / denom) : 0.0;
+        const double velNcc = (denom > 1e-9) ? (dotSum / denom) : 0.0;
+        const double dDenom = std::sqrt(dVisNormSq * dImuNormSq);
+        const double accNcc = (dDenom > 1e-6) ? (dDotSum / dDenom) : velNcc;
+        return 0.70 * velNcc + 0.30 * accNcc;
     };
 
     // Golden-Section Search to refine offset to < 0.1 ms precision
@@ -536,6 +566,51 @@ OpticalSyncResult OpticalSync::solveSyncAndAxes(
             if (std::isfinite(focalScale)) {
                 result.effectiveFocalScale = std::max(0.85, std::min(1.20, focalScale));
                 result.hasFocalScaleEstimate = true;
+            }
+        }
+    }
+
+    // IRLS Roll (Z-axis) Gyro Scale estimation in [0.92, 1.08] to eliminate 4-7 deg static tilt bias
+    result.rollGyroScale = 1.0;
+    result.hasRollScaleEstimate = false;
+    if (bestNccOverall >= 0.70 && visSamples.size() >= 8) {
+        const double* M = presets[bestPreset].m;
+        const double offSec = refinedOffsetMs * 0.001;
+        struct RollPair {
+            double vwz, iwz, weight;
+        };
+        std::vector<RollPair> rPairs;
+        rPairs.reserve(visSamples.size());
+        double imuZEnergy = 0.0;
+        for (const auto& vs : visSamples) {
+            const SampledGyro raw = sampleGyroAt(sortedGyro, vs.tMid + offSec);
+            const double gx = raw.gx - header.gyro_bias_x;
+            const double gy = raw.gy - header.gyro_bias_y;
+            const double gz = raw.gz - header.gyro_bias_z;
+            const double iz = M[6] * gx + M[7] * gy + M[8] * gz;
+            if (std::fabs(iz) > 0.08) {
+                rPairs.push_back({vs.wz, iz, 1.0});
+                imuZEnergy += iz * iz;
+            }
+        }
+        if (rPairs.size() >= 5 && imuZEnergy > 0.03) {
+            double rScale = 1.0;
+            for (int iter = 0; iter < 3; ++iter) {
+                double num = 0.0, den = 0.0;
+                for (const auto& p : rPairs) {
+                    num += p.weight * (p.vwz * p.iwz);
+                    den += p.weight * (p.iwz * p.iwz);
+                }
+                if (den <= 1e-9) break;
+                rScale = num / den;
+                for (auto& p : rPairs) {
+                    const double err = std::fabs(p.vwz - rScale * p.iwz);
+                    p.weight = (err < 0.04) ? 1.0 : (0.04 / (err + 1e-6));
+                }
+            }
+            if (std::isfinite(rScale)) {
+                result.rollGyroScale = std::max(0.92, std::min(1.08, rScale));
+                result.hasRollScaleEstimate = true;
             }
         }
     }
@@ -919,9 +994,9 @@ HybridResidualResult HybridResidualTracker::finalize(double nominalFps) const {
         rawTy[i] = rawTy[m - 1];
     }
 
-    // Zero-Phase High-Pass Filter (tau = 0.65s -> rejects slow drift, isolates >0.8Hz bounce)
+    // Zero-Phase High-Pass Filter (tau = 1.20s -> handles both bounce and off-axis 90 deg roll lever-arm drift)
     const double dt = (nominalFps > 1.0) ? (1.0 / nominalFps) : (1.0 / 30.0);
-    const double alpha = std::exp(-dt / 0.65);
+    const double alpha = std::exp(-dt / 1.20);
 
     auto zeroPhaseLowPass = [&](const std::vector<double>& in) -> std::vector<double> {
         std::vector<double> fwd(n, in[0]);
@@ -939,7 +1014,7 @@ HybridResidualResult HybridResidualTracker::finalize(double nominalFps) const {
     const std::vector<double> baseTx = zeroPhaseLowPass(rawTx);
     const std::vector<double> baseTy = zeroPhaseLowPass(rawTy);
 
-    const double maxShiftPx = 60.0 * (static_cast<double>(profile_.height > 0 ? profile_.height : 1080) / 1080.0);
+    const double maxShiftPx = 85.0 * (static_cast<double>(profile_.height > 0 ? profile_.height : 1080) / 1080.0);
     res.shiftX.resize(n, 0.0);
     res.shiftY.resize(n, 0.0);
 

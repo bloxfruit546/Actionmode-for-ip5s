@@ -869,7 +869,7 @@ void testFastPanSwingLagLimit() {
 
 void testEffectiveFocalScaleAndCubicMicroJitter() {
     const int w = 320, h = 180;
-    const double fxNom = 276.67, fyNom = 276.67, cx = 160.0, cy = 90.0;
+    const double fxNom = 302.5, fyNom = 302.5, cx = 160.0, cy = 90.0;
     const double trueScale = 1.07;
     const double fxTrue = fxNom * trueScale;
     const double fyTrue = fyNom * trueScale;
@@ -880,8 +880,8 @@ void testEffectiveFocalScaleAndCubicMicroJitter() {
     hdr.width = 1920;
     hdr.height = 1080;
     hdr.nominal_fps = 30.0;
-    hdr.lens_fx = 1660.0;
-    hdr.lens_fy = 1660.0;
+    hdr.lens_fx = 1815.0;
+    hdr.lens_fy = 1815.0;
     hdr.lens_cx = 960.0;
     hdr.lens_cy = 540.0;
 
@@ -1433,6 +1433,84 @@ void testMotoEngineBuzz32HzPotholeAndRoadParallax() {
                 syncRes.bestNCC, maxPitchErrDeg);
 }
 
+void testClassroomAntiPumpingAndStaticRollSettle() {
+    const auto prof = gf::CalibrationProfile::defaultIPhone5s1080p30();
+    assert(std::fabs(prof.fx - 1815.0) < 1e-3);
+
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.width = 1920;
+    hdr.height = 1080;
+    hdr.nominal_fps = 30.0;
+    hdr.lens_fx = prof.fx;
+    hdr.lens_fy = prof.fy;
+    hdr.lens_cx = prof.cx;
+    hdr.lens_cy = prof.cy;
+
+    // 4.5s @ 90Hz: 0..1.0s still, 1.0..1.8s roll 0->90 deg, 1.8..2.6s hold 90 deg,
+    // 2.6..3.2s roll 90->45 deg, 3.2..4.5s hold 45 deg.
+    auto trueRollDegAt = [](double t) -> double {
+        if (t < 1.0) return 0.0;
+        if (t < 1.8) return 90.0 * (t - 1.0) / 0.8;
+        if (t < 2.6) return 90.0;
+        if (t < 3.2) return 90.0 - 45.0 * (t - 2.6) / 0.6;
+        return 45.0;
+    };
+
+    const int nImu = 405;
+    const double dtImu = 1.0 / 90.0;
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    for (int i = 0; i < nImu; ++i) {
+        const double t = i * dtImu;
+        const double r0 = trueRollDegAt(std::max(0.0, t - 0.5 * dtImu)) * (kPi / 180.0);
+        const double r1 = trueRollDegAt(t + 0.5 * dtImu) * (kPi / 180.0);
+        const double wzCamTrue = (r1 - r0) / dtImu;
+        // Inject -4% MEMS Z scale error (raw gyro under-reports by 4%, corrected by rollGyroScale=1/0.96)
+        const double wzCamMeas = wzCamTrue * 0.96;
+        gyro.push_back({t, 0.0, 0.0, -wzCamMeas});
+
+        const gf::Quat qTrue = gf::Quat::fromAxisAngle({0.0, 0.0, 1.0}, r1);
+        const gf::Vec3 aCam = qTrue.conjugate().rotateVector({0.0, 1.0, 0.0});
+        accel.push_back({t, static_cast<float>(-aCam.y), static_cast<float>(-aCam.x), static_cast<float>(-aCam.z)});
+    }
+
+    std::vector<gf::GFFrameRecord> frames;
+    for (int f = 0; f < 135; ++f) {
+        frames.push_back({static_cast<uint32_t>(f), f / 30.0, 0.016f, 100.0f, 0.7f, 0.0152f});
+    }
+
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel, nullptr, false, 1.0 / 0.96);
+
+    gf::StabilizerConfig cfg;
+    cfg.pitchSmoothness = 0.85;
+    cfg.yawSmoothness = 0.85;
+    cfg.rollSmoothness = 0.92;
+    cfg.horizonLockEnabled = true;
+    cfg.horizonLockAmount = 1.0;
+
+    const auto traj = engine.solve(frames, cfg);
+    assert(traj.valid);
+    assert(traj.maxOutputRollErrorDeg < 0.50);
+
+    const auto warp = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
+        engine, traj, prof, 30.0, 0.0, true, true
+    );
+    assert(warp.packets.size() == 135);
+
+    // Check ZERO early zoom pumping during stationary 00:00.00..00:00.75 (frames 0..22)
+    double maxIntroZoom = 0.0;
+    for (size_t f = 0; f <= 22; ++f) {
+        maxIntroZoom = std::max(maxIntroZoom, static_cast<double>(warp.packets[f].zoomUsed));
+    }
+    assert(maxIntroZoom <= 1.05);
+
+    std::printf("Test Classroom v1.1.0 (IntroZoom[0..0.75s]=%.3fx <= 1.05x | RollErr(90/45 deg)=%.3f deg | fx=%.0f) PASSED.\n",
+                maxIntroZoom, traj.maxOutputRollErrorDeg, prof.fx);
+}
+
 } // namespace
 
 int main() {
@@ -1453,5 +1531,6 @@ int main() {
     testHybridOpticalResidualTranslationalBounce();
     testMotoCorneringCentripetalHorizonLock();
     testMotoEngineBuzz32HzPotholeAndRoadParallax();
+    testClassroomAntiPumpingAndStaticRollSettle();
     return 0;
 }

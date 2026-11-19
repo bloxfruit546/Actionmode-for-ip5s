@@ -13,6 +13,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) BOOL hasReadoutEstimate;
 @property (nonatomic, assign) double effectiveFocalScale;
 @property (nonatomic, assign) BOOL hasFocalScaleEstimate;
+@property (nonatomic, assign) double rollGyroScale;
+@property (nonatomic, assign) BOOL hasRollScaleEstimate;
 @property (nonatomic, copy) NSString *diagnosticMessage;
 @end
 
@@ -63,6 +65,7 @@ NS_ASSUME_NONNULL_BEGIN
                        hasReadoutOverride:(BOOL)hasReadoutOverride
                       signedReadoutTimeMs:(double)signedReadoutTimeMs
                        focalScaleOverride:(double)focalScaleOverride
+                       rollGyroScaleOverride:(double)rollGyroScaleOverride
                            motoActionMode:(BOOL)motoActionMode
                              edgeFillMode:(NSInteger)edgeFillMode
                             fovScaleBoost:(double)fovScaleBoost

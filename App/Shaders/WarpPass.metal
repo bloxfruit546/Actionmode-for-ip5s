@@ -10,7 +10,7 @@ struct RowSlice {
 struct WarpFrameUniforms {
     RowSlice slices[64];
     RowSlice histH[3];
-    float4 histGains;    // (gain0, gain1, gain2, unused)
+    float4 histGains;    // (gain0, gain1, gain2, readoutAxis: 0=Y, 1=X)
     float4 polishParams; // (edgeFillMode, sharpenStrength, currentZoom, histCount)
     uint2 outSize;
     uint2 inSize;
@@ -66,16 +66,18 @@ inline float3 solveRollingShutterAndDistort(
     float dstLumaY,
     constant WarpFrameUniforms& u
 ) {
-    const float outHMinus1 = max(float(u.lumaOutSize.y) - 1.0f, 1.0f);
+    const float inWMinus1 = max(float(u.lumaInSize.x) - 1.0f, 1.0f);
     const float inHMinus1 = max(float(u.lumaInSize.y) - 1.0f, 1.0f);
-    float rowNorm = clamp(dstLumaY / outHMinus1, 0.0f, 1.0f);
+    const bool scanAlongX = (u.histGains.w > 0.5f);
+    // Start at sensor center (0.5) so 90-degree rotated frames converge accurately in 4 iterations
+    float rowNorm = 0.5f;
 
     const float3 dstP = float3(dstLumaX, dstLumaY, 1.0f);
     float sx = dstLumaX;
     float sy = dstLumaY;
 
-    // 3-iteration fixed-point solver for per-row rolling shutter convergence (< 0.01 px)
-    for (int iter = 0; iter < 3; ++iter) {
+    // 4-iteration fixed-point solver for per-row rolling shutter convergence (< 0.005 px even at 90 deg roll)
+    for (int iter = 0; iter < 4; ++iter) {
         const float fIdx = clamp(rowNorm * 63.0f, 0.0f, 63.0f);
         const int i0 = min(int(floor(fIdx)), 62);
         const float t = fIdx - float(i0);
@@ -91,7 +93,7 @@ inline float3 solveRollingShutterAndDistort(
         const float invW = 1.0f / w;
         sx = dot(r0, dstP) * invW;
         sy = dot(r1, dstP) * invW;
-        rowNorm = clamp(sy / inHMinus1, 0.0f, 1.0f);
+        rowNorm = scanAlongX ? clamp(sx / inWMinus1, 0.0f, 1.0f) : clamp(sy / inHMinus1, 0.0f, 1.0f);
     }
 
     return applyBrownConradyDistort(sx, sy, u);
@@ -243,7 +245,7 @@ kernel void lanczos4_warp_luma(
             const float localContrast = max2x2 - min2x2;
             const float flatNoiseGate = smoothstep(0.015f, 0.05f, localContrast);
             const float haloGuard = clamp(1.0f - max2x2, 0.0f, 1.0f);
-            const float zoomBoost = clamp(1.0f + 0.85f * (currentZoom - 1.0f), 1.0f, 1.65f);
+            const float zoomBoost = clamp(1.0f + 1.15f * (currentZoom - 1.0f), 1.0f, 2.05f);
             const float avg2x2 = 0.25f * (c00 + c10 + c01 + c11);
             const float detail = relaxedY - avg2x2;
             const float casWeight = sharpenStrength * zoomBoost * flatNoiseGate * (0.35f + 0.65f * haloGuard);

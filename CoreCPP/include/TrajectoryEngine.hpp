@@ -50,7 +50,8 @@ public:
         const std::vector<GFGyroRecord>& gyroRecords,
         const std::vector<GFAccelRecord>& accelRecords,
         const double* customAxisMatrix = nullptr,
-        bool motoActionMode = false
+        bool motoActionMode = false,
+        double rollGyroScale = 1.0
     );
 
     Quat sampleRawQuaternionAt(double timestampSec) const;
