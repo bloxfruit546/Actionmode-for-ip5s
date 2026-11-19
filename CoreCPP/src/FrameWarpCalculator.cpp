@@ -180,7 +180,9 @@ WarpComputationResult FrameWarpCalculator::computeAllFramesWithRollingShutter(
     bool rollingShutterCorrection,
     bool dynamicZoomEnabled,
     const std::vector<double>* residualShiftX,
-    const std::vector<double>* residualShiftY
+    const std::vector<double>* residualShiftY,
+    EdgeFillMode edgeFillMode,
+    double fovScaleBoost
 ) {
     WarpComputationResult res;
     const size_t n = std::min(traj.rawFrameQuats.size(), traj.smoothFrameQuats.size());
@@ -314,11 +316,18 @@ WarpComputationResult FrameWarpCalculator::computeAllFramesWithRollingShutter(
     res.maxZoom = 0.0;
     double sumZoom = 0.0;
 
+    const double boost = (edgeFillMode != EdgeFillMode::StandardCrop)
+        ? std::min(1.0, std::max(0.0, fovScaleBoost))
+        : 0.0;
+
     for (size_t i = 0; i < n; ++i) {
         const auto shift = getShift(i);
         double zFinal = zSmooth[i];
         if (maxZoomLimit > 1.0) {
             zFinal = std::min(zFinal, maxZoomLimit);
+        }
+        if (boost > 0.0) {
+            zFinal = 1.0 + (1.0 - boost) * (zFinal - 1.0);
         }
 
         const Quat qCorrMid = (traj.rawFrameQuats[i].conjugate() * adjustedSmooth[i]).normalized();
@@ -351,6 +360,7 @@ WarpComputationResult FrameWarpCalculator::computeAllFramesWithRollingShutter(
         sumZoom += zFinal;
     }
 
+    res.adjustedSmoothQuats = std::move(adjustedSmooth);
     res.avgZoom = sumZoom / static_cast<double>(n);
     return res;
 }

@@ -11,6 +11,12 @@ namespace gf {
 
 static constexpr int kRollingShutterSlices = 64;
 
+enum class EdgeFillMode : int {
+    StandardCrop = 0,
+    TemporalFullFrame = 1,
+    MirrorEdge = 2
+};
+
 struct GFWarpMatrixPacket {
     float m[9]; // Center-row 3x3 inverse homography H_inv
     float zoomUsed;
@@ -24,6 +30,7 @@ struct GFWarpFrameLUT {
 struct WarpComputationResult {
     std::vector<GFWarpMatrixPacket> packets;
     std::vector<GFWarpFrameLUT> frameLUTs;
+    std::vector<Quat> adjustedSmoothQuats;
     double minZoom = 1.0;
     double maxZoom = 1.0;
     double avgZoom = 1.0;
@@ -75,7 +82,9 @@ public:
         bool rollingShutterCorrection,
         bool dynamicZoomEnabled,
         const std::vector<double>* residualShiftX = nullptr,
-        const std::vector<double>* residualShiftY = nullptr
+        const std::vector<double>* residualShiftY = nullptr,
+        EdgeFillMode edgeFillMode = EdgeFillMode::StandardCrop,
+        double fovScaleBoost = 0.0
     );
 };
 

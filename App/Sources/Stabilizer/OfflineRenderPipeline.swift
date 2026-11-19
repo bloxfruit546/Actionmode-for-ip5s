@@ -21,6 +21,10 @@ struct StabilizeExportConfig: Codable {
     let focalScaleOverride: Double
     let hybridResidualEnabled: Bool
     let motoActionMode: Bool
+    let edgeFillMode: Int
+    let fovScaleBoost: Double
+    let sharpenStrength: Double
+    let exportBitrateMbps: Int
 
     init(
         pitchSmoothness: Double,
@@ -39,7 +43,11 @@ struct StabilizeExportConfig: Codable {
         signedReadoutTimeMs: Double,
         focalScaleOverride: Double,
         hybridResidualEnabled: Bool = true,
-        motoActionMode: Bool = false
+        motoActionMode: Bool = false,
+        edgeFillMode: Int = 0,
+        fovScaleBoost: Double = 1.0,
+        sharpenStrength: Double = 0.45,
+        exportBitrateMbps: Int = 45
     ) {
         self.pitchSmoothness = pitchSmoothness
         self.yawSmoothness = yawSmoothness
@@ -58,6 +66,10 @@ struct StabilizeExportConfig: Codable {
         self.focalScaleOverride = focalScaleOverride
         self.hybridResidualEnabled = hybridResidualEnabled
         self.motoActionMode = motoActionMode
+        self.edgeFillMode = edgeFillMode
+        self.fovScaleBoost = fovScaleBoost
+        self.sharpenStrength = sharpenStrength
+        self.exportBitrateMbps = exportBitrateMbps
     }
 
     init(from decoder: Decoder) throws {
@@ -79,6 +91,10 @@ struct StabilizeExportConfig: Codable {
         focalScaleOverride = try c.decode(Double.self, forKey: .focalScaleOverride)
         hybridResidualEnabled = (try? c.decodeIfPresent(Bool.self, forKey: .hybridResidualEnabled)) ?? true
         motoActionMode = (try? c.decodeIfPresent(Bool.self, forKey: .motoActionMode)) ?? false
+        edgeFillMode = (try? c.decodeIfPresent(Int.self, forKey: .edgeFillMode)) ?? 0
+        fovScaleBoost = (try? c.decodeIfPresent(Double.self, forKey: .fovScaleBoost)) ?? 1.0
+        sharpenStrength = (try? c.decodeIfPresent(Double.self, forKey: .sharpenStrength)) ?? 0.45
+        exportBitrateMbps = (try? c.decodeIfPresent(Int.self, forKey: .exportBitrateMbps)) ?? 45
     }
 }
 
@@ -275,11 +291,19 @@ final class OfflineRenderPipeline {
 
                 let writer = try AVAssetWriter(outputURL: outURL, fileType: .mov)
                 writer.shouldOptimizeForNetworkUse = false
+                if !asset.metadata.isEmpty {
+                    writer.metadata = asset.metadata
+                } else if !asset.commonMetadata.isEmpty {
+                    writer.metadata = asset.commonMetadata
+                }
 
-                let bitrate = (height >= 1000) ? 45_000_000 : 35_000_000
+                let targetMbps = max(20, min(60, config.exportBitrateMbps > 0 ? config.exportBitrateMbps : ((height >= 1000) ? 45 : 35)))
+                let bitrate = targetMbps * 1_000_000
                 let compressionProps: [String: Any] = [
                     AVVideoAverageBitRateKey: bitrate,
                     AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+                    AVVideoH264EntropyModeKey: AVVideoH264EntropyModeCABAC,
+                    AVVideoAllowFrameReorderingKey: true,
                     AVVideoExpectedSourceFrameRateKey: Int(plan.nominalFps > 1 ? plan.nominalFps : 30)
                 ]
                 let videoWriterSettings: [String: Any] = [
@@ -649,7 +673,10 @@ final class OfflineRenderPipeline {
             hasReadoutOverride: config.hasReadoutOverride,
             signedReadoutTimeMs: config.signedReadoutTimeMs,
             focalScaleOverride: config.focalScaleOverride,
-            motoActionMode: config.motoActionMode
+            motoActionMode: config.motoActionMode,
+            edgeFillMode: config.edgeFillMode,
+            fovScaleBoost: config.fovScaleBoost,
+            sharpenStrength: config.sharpenStrength
         )
     }
 

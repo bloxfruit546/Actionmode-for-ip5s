@@ -45,8 +45,14 @@ add_executable(gf_horizon_rs_autosync_tests
 )
 target_link_libraries(gf_horizon_rs_autosync_tests PRIVATE gf_core)
 
+add_executable(gf_quality_metrics_tests
+    CoreCPP/tests/test_quality_metrics.cpp
+)
+target_link_libraries(gf_quality_metrics_tests PRIVATE gf_core)
+
 enable_testing()
 add_test(NAME gf_core_math_tests COMMAND gf_core_tests)
 add_test(NAME gf_sidecar_calib_tests COMMAND gf_sidecar_calib_tests)
 add_test(NAME gf_stabilizer_tests COMMAND gf_stabilizer_tests)
 add_test(NAME gf_horizon_rs_autosync_tests COMMAND gf_horizon_rs_autosync_tests)
+add_test(NAME gf_quality_metrics_tests COMMAND gf_quality_metrics_tests)

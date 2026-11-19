@@ -63,7 +63,10 @@ NS_ASSUME_NONNULL_BEGIN
                        hasReadoutOverride:(BOOL)hasReadoutOverride
                       signedReadoutTimeMs:(double)signedReadoutTimeMs
                        focalScaleOverride:(double)focalScaleOverride
-                           motoActionMode:(BOOL)motoActionMode;
+                           motoActionMode:(BOOL)motoActionMode
+                             edgeFillMode:(NSInteger)edgeFillMode
+                            fovScaleBoost:(double)fovScaleBoost
+                          sharpenStrength:(double)sharpenStrength;
 
 - (void)pushHybridResidualPixelBuffer:(CVPixelBufferRef)pixelBuffer timestampSec:(double)ts;
 - (void)finalizeHybridResidual;
