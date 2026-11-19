@@ -104,7 +104,13 @@ final class StabilizeViewController: UIViewController {
     private let unlimitedZoomSwitch = UISwitch()
 
     private let dynamicZoomLabel = UILabel()
-    private let dynamicZoomSwitch = UISwitch()
+    private let zoomModeControl: UISegmentedControl = {
+        let sc = UISegmentedControl(items: ["Fixed Crop", "Smooth Dynamic"])
+        sc.translatesAutoresizingMaskIntoConstraints = false
+        sc.selectedSegmentIndex = 0
+        sc.tintColor = UIColor(red: 0.30, green: 0.85, blue: 0.55, alpha: 1.0)
+        return sc
+    }()
 
     private let horizonLabel = UILabel()
     private let horizonSwitch = UISwitch()
@@ -304,9 +310,7 @@ final class StabilizeViewController: UIViewController {
         unlimitedZoomSwitch.isOn = true
         unlimitedZoomSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
 
-        dynamicZoomSwitch.translatesAutoresizingMaskIntoConstraints = false
-        dynamicZoomSwitch.isOn = true
-        dynamicZoomSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
+        zoomModeControl.addTarget(self, action: #selector(handleFramingChanged), for: .valueChanged)
 
         horizonSwitch.translatesAutoresizingMaskIntoConstraints = false
         horizonSwitch.isOn = true
@@ -365,7 +369,6 @@ final class StabilizeViewController: UIViewController {
         presetRow.distribution = .fillEqually
 
         let zoomRow = makeSwitchRow(zoomLabel, unlimitedZoomSwitch)
-        let dynZoomRow = makeSwitchRow(dynamicZoomLabel, dynamicZoomSwitch)
         let horizonRow = makeSwitchRow(horizonLabel, horizonSwitch)
         let rsRow = makeSwitchRow(rsLabel, rsSwitch)
         let hybridRow = makeSwitchRow(hybridResidualLabel, hybridResidualSwitch)
@@ -384,7 +387,8 @@ final class StabilizeViewController: UIViewController {
             rollSlider,
             zoomRow,
             zoomSlider,
-            dynZoomRow,
+            dynamicZoomLabel,
+            zoomModeControl,
             horizonRow,
             tiltLabel,
             tiltSlider,
@@ -469,7 +473,7 @@ final class StabilizeViewController: UIViewController {
             horizonLockAmount: 1.0,
             horizonTiltOffsetDeg: Double(tiltSlider.value),
             rollingShutterCorrection: rsSwitch.isOn,
-            dynamicZoomEnabled: dynamicZoomSwitch.isOn,
+            dynamicZoomEnabled: zoomModeControl.selectedSegmentIndex == 1,
             axisPresetIndex: detectedAxisPresetIndex,
             hasReadoutOverride: hasReadoutOverride,
             signedReadoutTimeMs: detectedSignedReadoutMs,
@@ -505,7 +509,7 @@ final class StabilizeViewController: UIViewController {
         unlimitedZoomSwitch.isOn = false
         zoomSlider.value = 1.65
         rsSwitch.isOn = true
-        dynamicZoomSwitch.isOn = true
+        zoomModeControl.selectedSegmentIndex = 1
         updateSliderLabels()
         handlePreview()
     }
@@ -520,7 +524,7 @@ final class StabilizeViewController: UIViewController {
         unlimitedZoomSwitch.isOn = false
         zoomSlider.value = 1.15
         rsSwitch.isOn = true
-        dynamicZoomSwitch.isOn = true
+        zoomModeControl.selectedSegmentIndex = 1
         updateSliderLabels()
         handlePreview()
     }
@@ -535,7 +539,7 @@ final class StabilizeViewController: UIViewController {
         unlimitedZoomSwitch.isOn = true
         zoomSlider.value = 2.00
         rsSwitch.isOn = true
-        dynamicZoomSwitch.isOn = true
+        zoomModeControl.selectedSegmentIndex = 1
         updateSliderLabels()
         handlePreview()
     }
@@ -550,7 +554,7 @@ final class StabilizeViewController: UIViewController {
         unlimitedZoomSwitch.isOn = false
         zoomSlider.value = 2.20
         rsSwitch.isOn = true
-        dynamicZoomSwitch.isOn = true
+        zoomModeControl.selectedSegmentIndex = 1
         updateSliderLabels()
         handlePreview()
     }
@@ -570,7 +574,9 @@ final class StabilizeViewController: UIViewController {
             zoomSlider.alpha = 1.0
         }
 
-        dynamicZoomLabel.text = dynamicZoomSwitch.isOn ? "Dynamic Zoom: ON" : "Dynamic Zoom: STATIC"
+        dynamicZoomLabel.text = (zoomModeControl.selectedSegmentIndex == 0)
+            ? "Zoom Mode: FIXED CROP (0% Breathing)"
+            : "Zoom Mode: SMOOTH DYNAMIC (Peak-Hold)"
         horizonLabel.text = horizonSwitch.isOn ? "360° Horizon Lock: ON" : "360° Horizon Lock: OFF"
         tiltLabel.text = String(format: "Horizon Tilt: %+.1f deg", tiltSlider.value)
         tiltSlider.isEnabled = horizonSwitch.isOn

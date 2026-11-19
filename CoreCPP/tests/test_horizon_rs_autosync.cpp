@@ -1511,6 +1511,93 @@ void testClassroomAntiPumpingAndStaticRollSettle() {
                 maxIntroZoom, traj.maxOutputRollErrorDeg, prof.fx);
 }
 
+void testPortraitIntrinsicsAndZeroZoomSpike() {
+    // 1. Verify Peak-Hold Plateau (0.65s) + Ultra-Slow Release (<= 0.08x/sec) kills 125ms zoom snap
+    const auto prof = gf::CalibrationProfile::defaultIPhone5s1080p30();
+    const int nFrames = 120; // 4.0s @ 30fps
+    std::vector<gf::Quat> rawQuats(nFrames, gf::Quat::identity());
+    std::vector<gf::Quat> smoothQuats(nFrames, gf::Quat::identity());
+    std::vector<double> ts(nFrames, 0.0);
+    for (int f = 0; f < nFrames; ++f) {
+        ts[f] = f / 30.0;
+        // Sharp single-impulse roll spike at t=2.00s (frame 60)
+        const double rollDeg = 18.0 * std::exp(-std::pow((ts[f] - 2.0) / 0.08, 2.0));
+        rawQuats[f] = gf::Quat::fromAxisAngle({0.0, 0.0, 1.0}, rollDeg * (kPi / 180.0));
+    }
+
+    gf::TrajectoryEngine dummyEngine;
+    gf::TrajectoryResult traj;
+    traj.rawFrameQuats = rawQuats;
+    traj.smoothFrameQuats = smoothQuats;
+    traj.frameTimestampsSec = ts;
+    traj.valid = true;
+
+    const auto dynWarp = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
+        dummyEngine, traj, prof, 30.0, 0.0, false, true
+    );
+    const double zPeak = dynWarp.packets[60].zoomUsed;      // t = 2.000s
+    const double zAfter125ms = dynWarp.packets[64].zoomUsed; // t = 2.133s
+    const double zAfter1s = dynWarp.packets[90].zoomUsed;    // t = 3.000s
+    assert(zPeak > 1.25);
+    assert(std::fabs(zPeak - zAfter125ms) < 0.005); // ZERO 125ms zoom snap!
+    assert((zPeak - zAfter1s) <= 0.05);             // Ultra-slow <= 0.08x/sec release after 0.65s plateau!
+
+    // 2. Verify Fixed Crop has 0.000% breathing
+    const auto fixedWarp = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
+        dummyEngine, traj, prof, 30.0, 0.0, false, false
+    );
+    assert(std::fabs(fixedWarp.maxZoom - fixedWarp.minZoom) < 1e-6);
+
+    // 3. Verify Portrait 1080x1920 buffer with buggy legacy fx=1020.9 auto-upgrades to 1815.0 in OpticalSync
+    const int pw = 180, ph = 320; // Portrait 1080x1920 scaled by 1/6
+    const double fxTrue = 1815.0 * (320.0 / 1920.0); // 302.5
+    const double cxP = 90.0, cyP = 160.0;
+    gf::GFFileHeader pHdr{};
+    std::memcpy(pHdr.magic, "GFS5", 4);
+    pHdr.version = 2;
+    pHdr.width = 1080;
+    pHdr.height = 1920;
+    pHdr.nominal_fps = 30.0;
+    pHdr.lens_fx = 1020.9; // Legacy buggy width-scaled portrait fx
+    pHdr.lens_fy = 1020.9;
+    pHdr.lens_cx = 540.0;
+    pHdr.lens_cy = 960.0;
+
+    std::vector<gf::GFGyroRecord> pGyro;
+    for (int i = 0; i < 90; ++i) {
+        const double t = i / 90.0;
+        const double wyCam = 0.35 * std::cos(2.0 * kPi * 1.5 * t);
+        // Portrait (+x, -y, -z): wyCam = -gy -> gy = -wyCam
+        pGyro.push_back({t, 0.0, -wyCam, 0.0});
+    }
+    std::vector<gf::OpticalFlowFrame> pFrames;
+    for (int f = 0; f < 30; ++f) {
+        const double t = f / 30.0;
+        const double yawAng = (0.35 / (2.0 * kPi * 1.5)) * std::sin(2.0 * kPi * 1.5 * t);
+        gf::OpticalFlowFrame frame;
+        frame.timestampSec = t;
+        frame.width = pw;
+        frame.height = ph;
+        frame.luma.resize(static_cast<size_t>(pw * ph));
+        for (int y = 0; y < ph; ++y) {
+            for (int x = 0; x < pw; ++x) {
+                const double sx = (x - cxP) + yawAng * fxTrue;
+                const double sy = (y - cyP);
+                const double val = 128.0 + 35.0 * std::sin(sx * 0.09 + sy * 0.07) + 25.0 * std::cos(sx * 0.14 - sy * 0.11);
+                frame.luma[static_cast<size_t>(y * pw + x)] = static_cast<uint8_t>(std::max(0.0, std::min(255.0, val)));
+            }
+        }
+        pFrames.push_back(std::move(frame));
+    }
+    const auto pSync = gf::OpticalSync::solveSyncAndAxes(pFrames, pHdr, pGyro, false);
+    assert(pSync.valid);
+    assert(pSync.bestNCC > 0.95);
+    assert(std::fabs(pSync.effectiveFocalScale - 1.0) < 0.08); // Proves 1020.9 was auto-upgraded to 1815.0!
+
+    std::printf("Test Phase 7.2 v1.2.0 (ZoomPeak=%.3fx -> +125ms=%.3fx, +1.0s=%.3fx | Portrait 1080x1920 fx-upgrade NCC=%.3f, scale=%.3fx) PASSED.\n",
+                zPeak, zAfter125ms, zAfter1s, pSync.bestNCC, pSync.effectiveFocalScale);
+}
+
 } // namespace
 
 int main() {
@@ -1532,5 +1619,6 @@ int main() {
     testMotoCorneringCentripetalHorizonLock();
     testMotoEngineBuzz32HzPotholeAndRoadParallax();
     testClassroomAntiPumpingAndStaticRollSettle();
+    testPortraitIntrinsicsAndZeroZoomSpike();
     return 0;
 }

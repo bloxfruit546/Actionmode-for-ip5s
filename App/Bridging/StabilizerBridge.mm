@@ -291,10 +291,11 @@ struct GFHistSlot {
             _profile.k1 = 0.012;
             _profile.k2 = -0.022;
         }
-        if (std::fabs(_profile.fx - 1660.0) < 2.0 && _profile.width >= 1900) {
+        const uint32_t longSide = std::max(_profile.width, _profile.height);
+        if (longSide >= 1900 && (_profile.fx < 1500.0 || std::fabs(_profile.fx - 1660.0) < 2.0)) {
             _profile.fx = 1815.0;
             _profile.fy = 1815.0;
-        } else if (std::fabs(_profile.fx - 1106.67) < 2.0 && _profile.width == 1280) {
+        } else if (longSide >= 1200 && longSide < 1500 && (_profile.fx < 1000.0 || std::fabs(_profile.fx - 1106.67) < 2.0)) {
             _profile.fx = 1210.0;
             _profile.fy = 1210.0;
         }

@@ -272,51 +272,64 @@ WarpComputationResult FrameWarpCalculator::computeAllFramesWithRollingShutter(
         zMin[i] = zReq;
     }
 
-    // Step 3: Tight Anti-Pumping Dynamic Zoom Ramp (Finite 0.18s Hermite Lookahead + 0.28s Release + 0.03x Deadband)
-    // Eliminates early zoom bleed during stationary intro while guaranteeing 0% black borders.
+    // Step 3: Cinema Anti-Spike Dynamic Zoom Controller:
+    //   1. Peak-Hold Plateau (0.65s): holds any zoom peak flat for >= 0.65s (zero 125ms snap!)
+    //   2. Ultra-Slow Release (tau=2.5s, max 0.08x/sec): imperceptible zoom-out
+    //   3. Finite Cosine Pre-Attack (0.30s): smooth ramp into turns with zero early intro bleed
     std::vector<double> zSmooth = zMin;
     if (dynamicZoomEnabled) {
         const double effFps = (nominalFps > 1.0) ? nominalFps : 30.0;
-        const int lookaheadFrames = std::max(2, static_cast<int>(std::round(0.18 * effFps)));
-        const int releaseFrames = std::max(3, static_cast<int>(std::round(0.28 * effFps)));
+        const int holdFrames = std::max(4, static_cast<int>(std::round(0.65 * effFps)));
+        const int attackFrames = std::max(3, static_cast<int>(std::round(0.30 * effFps)));
+        constexpr double kPi = 3.14159265358979323846;
 
-        std::vector<double> zEnv = zMin;
+        // 3.1 Peak-Hold Plateau (backward window of 0.65s keeps peak flat after reaching it)
+        std::vector<double> zHold(n, 1.0);
         for (size_t i = 0; i < n; ++i) {
-            const int kLo = std::max(0, static_cast<int>(i) - releaseFrames);
-            const int kHi = std::min(static_cast<int>(n) - 1, static_cast<int>(i) + lookaheadFrames);
-            double zMax = zMin[i];
-            for (int k = kLo; k <= kHi; ++k) {
-                if (k == static_cast<int>(i)) continue;
-                const double dist = std::fabs(static_cast<double>(k - static_cast<int>(i)));
-                const double span = (k > static_cast<int>(i))
-                    ? static_cast<double>(lookaheadFrames + 1)
-                    : static_cast<double>(releaseFrames + 1);
-                const double u = std::min(1.0, dist / span);
-                const double w = 1.0 - (u * u * (3.0 - 2.0 * u)); // Cubic Hermite smoothstep decay
-                const double cand = 1.0 + w * (zMin[static_cast<size_t>(k)] - 1.0);
-                zMax = std::max(zMax, cand);
+            const int kLo = std::max(0, static_cast<int>(i) - holdFrames);
+            double peak = zMin[i];
+            for (int k = kLo; k <= static_cast<int>(i); ++k) {
+                peak = std::max(peak, zMin[static_cast<size_t>(k)]);
             }
-            zEnv[i] = zMax;
+            zHold[i] = peak;
         }
 
-        // 0.03x hysteresis deadband prevents micro-breathing on small fluctuations
-        double zHold = zEnv[0];
-        std::vector<double> zDead(n, zHold);
+        // 3.2 Ultra-Slow Release (tau = 2.5s, hard rate cap <= 0.08x / sec)
+        const double alphaRel = std::exp(-dt / 2.50);
+        const double maxDropPerFrame = 0.08 * dt;
+        std::vector<double> zRel(n, 1.0);
+        zRel[0] = zHold[0];
         for (size_t i = 1; i < n; ++i) {
-            if (zEnv[i] > zHold) {
-                zHold = zEnv[i];
-            } else if (zEnv[i] < zHold - 0.03) {
-                zHold = zEnv[i] + 0.03;
+            if (zHold[i] >= zRel[i - 1]) {
+                zRel[i] = zHold[i];
+            } else {
+                const double expTarget = alphaRel * zRel[i - 1] + (1.0 - alphaRel) * zHold[i];
+                const double rateCapped = std::max(zHold[i], zRel[i - 1] - maxDropPerFrame);
+                zRel[i] = std::max(zHold[i], std::max(expTarget, rateCapped));
             }
-            zDead[i] = std::max(zMin[i], zHold);
+        }
+
+        // 3.3 Finite Cosine Pre-Attack (0.30s lookahead S-curve, strictly 0 bleed beyond 0.30s)
+        zSmooth = zRel;
+        for (size_t i = 0; i < n; ++i) {
+            const int kHi = std::min(static_cast<int>(n) - 1, static_cast<int>(i) + attackFrames);
+            double zMax = zRel[i];
+            for (int k = static_cast<int>(i) + 1; k <= kHi; ++k) {
+                const double u = static_cast<double>(k - static_cast<int>(i)) / static_cast<double>(attackFrames + 1);
+                const double w = 0.5 * (1.0 + std::cos(kPi * u));
+                const double cand = 1.0 + w * (zRel[static_cast<size_t>(k)] - 1.0);
+                zMax = std::max(zMax, cand);
+            }
+            zSmooth[i] = std::max(zMin[i], zMax);
         }
 
         // Light 3-tap C1 polish strictly >= zMin[i]
-        zSmooth = zDead;
+        std::vector<double> zPolished = zSmooth;
         for (size_t i = 1; i + 1 < n; ++i) {
-            const double val = 0.25 * zDead[i - 1] + 0.50 * zDead[i] + 0.25 * zDead[i + 1];
-            zSmooth[i] = std::max(zMin[i], val);
+            const double val = 0.25 * zSmooth[i - 1] + 0.50 * zSmooth[i] + 0.25 * zSmooth[i + 1];
+            zPolished[i] = std::max(zMin[i], val);
         }
+        zSmooth = std::move(zPolished);
     } else {
         double staticMax = 1.0;
         for (double z : zMin) {

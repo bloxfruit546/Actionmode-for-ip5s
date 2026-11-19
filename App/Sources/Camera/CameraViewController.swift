@@ -82,9 +82,9 @@ final class CameraViewController: UIViewController {
     private let antiBlurBtn: UIButton = {
         let btn = UIButton(type: .system)
         btn.translatesAutoresizingMaskIntoConstraints = false
-        btn.setTitle("AntiBlur: ON", for: .normal)
+        btn.setTitle("Cap:<=1/160", for: .normal)
         btn.setTitleColor(UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0), for: .normal)
-        btn.titleLabel?.font = UIFont.systemFont(ofSize: 11, weight: .semibold)
+        btn.titleLabel?.font = UIFont.systemFont(ofSize: 10.5, weight: .semibold)
         btn.backgroundColor = UIColor(white: 0.18, alpha: 0.85)
         btn.layer.cornerRadius = 6
         return btn
@@ -290,10 +290,21 @@ final class CameraViewController: UIViewController {
     }
 
     @objc private func handleToggleAntiBlur() {
-        let next = !engine.isAntiBlurCapEnabled
-        engine.setAntiBlurShutterCap(next)
-        antiBlurBtn.setTitle(next ? "AntiBlur: ON" : "AntiBlur: OFF", for: .normal)
-        antiBlurBtn.setTitleColor(next ? UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0) : UIColor(white: 0.75, alpha: 1.0), for: .normal)
+        let nextTs: Int32
+        let label: String
+        switch engine.shutterCapTimescale {
+        case 0:
+            nextTs = 120; label = "Cap:<=1/120"
+        case 120:
+            nextTs = 160; label = "Cap:<=1/160"
+        case 160:
+            nextTs = 250; label = "Cap:<=1/250"
+        default:
+            nextTs = 0; label = "Cap: OFF"
+        }
+        engine.setShutterCapTimescale(nextTs)
+        antiBlurBtn.setTitle(label, for: .normal)
+        antiBlurBtn.setTitleColor(nextTs > 0 ? UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0) : UIColor(white: 0.75, alpha: 1.0), for: .normal)
     }
 
     @objc private func handleToggleMotoMode() {

@@ -356,20 +356,26 @@ OpticalSyncResult OpticalSync::solveSyncAndAxes(
     });
 
     const double baseW = (header.width > 0) ? static_cast<double>(header.width) : 1920.0;
-    const double scale = static_cast<double>(frames[0].width) / baseW;
-    double rawFx = (header.lens_fx > 10.0) ? header.lens_fx : 1815.0;
-    double rawFy = (header.lens_fy > 10.0) ? header.lens_fy : 1815.0;
-    if (std::fabs(rawFx - 1660.0) < 2.0 && header.width >= 1900) {
+    const double baseH = (header.height > 0) ? static_cast<double>(header.height) : 1080.0;
+    const double baseLong = std::max(baseW, baseH);
+    const double frameLong = static_cast<double>(std::max(frames[0].width, frames[0].height));
+    const double scale = frameLong / baseLong;
+    const double scaleX = static_cast<double>(frames[0].width) / baseW;
+    const double scaleY = static_cast<double>(frames[0].height) / baseH;
+
+    double rawFx = (header.lens_fx > 10.0) ? header.lens_fx : (1815.0 * (baseLong / 1920.0));
+    double rawFy = (header.lens_fy > 10.0) ? header.lens_fy : rawFx;
+    if (baseLong >= 1900.0 && (rawFx < 1500.0 || std::fabs(rawFx - 1660.0) < 2.0)) {
         rawFx = 1815.0;
         rawFy = 1815.0;
-    } else if (std::fabs(rawFx - 1106.67) < 2.0 && header.width == 1280) {
+    } else if (baseLong >= 1200.0 && baseLong < 1500.0 && (rawFx < 1000.0 || std::fabs(rawFx - 1106.67) < 2.0)) {
         rawFx = 1210.0;
         rawFy = 1210.0;
     }
     const double fx = rawFx * scale;
     const double fy = rawFy * scale;
-    const double cx = ((header.lens_cx > 10.0) ? header.lens_cx : 960.0) * scale;
-    const double cy = ((header.lens_cy > 10.0) ? header.lens_cy : 540.0) * scale;
+    const double cx = ((header.lens_cx > 10.0) ? header.lens_cx : (0.5 * baseW)) * scaleX;
+    const double cy = ((header.lens_cy > 10.0) ? header.lens_cy : (0.5 * baseH)) * scaleY;
 
     struct VisSample {
         double tMid;
@@ -640,17 +646,22 @@ OpticalSyncResult OpticalSync::solveSyncAndAxes(
             const double dt = f1.timestampSec - f0.timestampSec;
             if (w < 64 || h < 64 || dt <= 1e-4 || dt > 0.25) continue;
 
-            auto solveHalf = [&](int gyStart, int gyEnd, double& outYFrac, double& owx, double& owy, double& owz) -> bool {
+            const bool scanAlongX = (w < h);
+            auto solveHalf = [&](int halfIdx, double& outScanFrac, double& owx, double& owy, double& owz) -> bool {
                 const int margin = 20;
                 const int gridCols = 6;
                 const int gridRows = 4;
                 const int cellW = (w - 2 * margin) / gridCols;
                 const int cellH = (h - 2 * margin) / gridRows;
+                const int gxStart = scanAlongX ? (halfIdx == 0 ? 0 : 3) : 0;
+                const int gxEnd = scanAlongX ? (halfIdx == 0 ? 3 : 6) : gridCols;
+                const int gyStart = scanAlongX ? 0 : (halfIdx == 0 ? 0 : 2);
+                const int gyEnd = scanAlongX ? gridRows : (halfIdx == 0 ? 2 : 4);
                 struct HFlow { double x, y, dx, dy; };
                 std::vector<HFlow> hobs;
-                double yFracSum = 0.0;
+                double scanFracSum = 0.0;
                 for (int gy = gyStart; gy < gyEnd; ++gy) {
-                    for (int gx = 0; gx < gridCols; ++gx) {
+                    for (int gx = gxStart; gx < gxEnd; ++gx) {
                         const int xStart = margin + gx * cellW;
                         const int yStart = margin + gy * cellH;
                         int bestU = xStart + cellW / 2, bestV = yStart + cellH / 2, bestScore = -1;
@@ -691,11 +702,13 @@ OpticalSyncResult OpticalSync::solveSyncAndAxes(
                             if (std::fabs(den) > 1e-6) subV += std::min(0.5, std::max(-0.5, (sU - sD) / den));
                         }
                         hobs.push_back({(bestU - cx) / fx, (bestV - cy) / fy, (subU - bestU) / fx, (subV - bestV) / fy});
-                        yFracSum += (static_cast<double>(bestV) / static_cast<double>(h - 1)) - 0.5;
+                        scanFracSum += scanAlongX
+                            ? ((static_cast<double>(bestU) / static_cast<double>(w - 1)) - 0.5)
+                            : ((static_cast<double>(bestV) / static_cast<double>(h - 1)) - 0.5);
                     }
                 }
                 if (hobs.size() < 4) return false;
-                outYFrac = yFracSum / static_cast<double>(hobs.size());
+                outScanFrac = scanFracSum / static_cast<double>(hobs.size());
                 double ATA[3][3] = {}, ATb[3] = {}, x[3] = {};
                 for (const auto& o : hobs) {
                     const double rx[3] = {o.x * o.y, -(1.0 + o.x * o.x), o.y};
@@ -712,8 +725,8 @@ OpticalSyncResult OpticalSync::solveSyncAndAxes(
 
             HalfVis hv{};
             hv.tMid = 0.5 * (f0.timestampSec + f1.timestampSec);
-            if (solveHalf(0, 2, hv.yFracTop, hv.wxTop, hv.wyTop, hv.wzTop) &&
-                solveHalf(2, 4, hv.yFracBot, hv.wxBot, hv.wyBot, hv.wzBot)) {
+            if (solveHalf(0, hv.yFracTop, hv.wxTop, hv.wyTop, hv.wzTop) &&
+                solveHalf(1, hv.yFracBot, hv.wxBot, hv.wyBot, hv.wzBot)) {
                 halfSamples.push_back(hv);
             }
         }

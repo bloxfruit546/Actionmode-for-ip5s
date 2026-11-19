@@ -94,8 +94,10 @@ final class ProCameraEngine: NSObject {
     private(set) var isFocusLocked = false
     private(set) var isExposureLocked = false
     private(set) var isAntiBlurCapEnabled = true
+    private(set) var shutterCapTimescale: Int32 = 160
     private(set) var isMotoModeEnabled = false
     private(set) var isRecording = false
+    private var shutterGuardFrameCounter: Int = 0
 
     // Active recording state (guarded by writerQueue)
     private var assetWriter: AVAssetWriter?
@@ -210,23 +212,34 @@ final class ProCameraEngine: NSObject {
         }
     }
 
-    func setAntiBlurShutterCap(_ enabled: Bool) {
+    func setShutterCapTimescale(_ timescale: Int32) {
         sessionQueue.async { [weak self] in
             guard let self = self, let dev = self.videoDevice else { return }
-            self.isAntiBlurCapEnabled = enabled
+            self.shutterCapTimescale = timescale
+            self.isAntiBlurCapEnabled = (timescale > 0)
             do {
                 try dev.lockForConfiguration()
-                if enabled {
-                    let capTimescale: Int32 = self.isMotoModeEnabled ? 250 : ((self.currentMode == .cinema1080p30) ? 120 : 240)
-                    dev.activeMaxExposureDuration = CMTime(value: 1, timescale: capTimescale)
+                if timescale > 0 {
+                    dev.activeMaxExposureDuration = CMTime(value: 1, timescale: timescale)
                 } else {
+                    if dev.isExposureModeSupported(.continuousAutoExposure) && !self.isExposureLocked {
+                        dev.exposureMode = .continuousAutoExposure
+                    }
                     dev.activeMaxExposureDuration = .invalid
                 }
                 dev.unlockForConfiguration()
             } catch {
-                FileLogger.shared.log("Anti-blur cap error: \(error.localizedDescription)")
+                FileLogger.shared.log("Shutter cap error: \(error.localizedDescription)")
+            }
+            if timescale > 0 {
+                self.enforceAntiBlurShutterIfNeeded()
             }
         }
+    }
+
+    func setAntiBlurShutterCap(_ enabled: Bool) {
+        let ts: Int32 = enabled ? (isMotoModeEnabled ? 250 : ((currentMode == .cinema1080p30) ? 160 : 240)) : 0
+        setShutterCapTimescale(ts)
     }
 
     func setMotoMode(_ enabled: Bool) {
@@ -243,6 +256,7 @@ final class ProCameraEngine: NSObject {
                         dev.focusMode = .locked
                         self.isFocusLocked = true
                     }
+                    self.shutterCapTimescale = 250
                     dev.activeMaxExposureDuration = CMTime(value: 1, timescale: 250)
                     self.isAntiBlurCapEnabled = true
                     self.currentBitrate = .mbps50
@@ -251,7 +265,8 @@ final class ProCameraEngine: NSObject {
                         dev.focusMode = .continuousAutoFocus
                         self.isFocusLocked = false
                     }
-                    let capTimescale: Int32 = (self.currentMode == .cinema1080p30) ? 120 : 240
+                    let capTimescale: Int32 = (self.currentMode == .cinema1080p30) ? 160 : 240
+                    self.shutterCapTimescale = self.isAntiBlurCapEnabled ? capTimescale : 0
                     dev.activeMaxExposureDuration = self.isAntiBlurCapEnabled ? CMTime(value: 1, timescale: capTimescale) : .invalid
                     self.currentBitrate = .mbps45
                 }
@@ -259,6 +274,7 @@ final class ProCameraEngine: NSObject {
             } catch {
                 FileLogger.shared.log("Moto Mode error: \(error.localizedDescription)")
             }
+            self.enforceAntiBlurShutterIfNeeded()
         }
     }
 
@@ -333,6 +349,7 @@ final class ProCameraEngine: NSObject {
                 ]
                 let vInput = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
                 vInput.expectsMediaDataInRealTime = true
+                vInput.transform = self.computeInitialVideoTransform()
 
                 let adaptorAttrs: [String: Any] = [
                     kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
@@ -656,17 +673,36 @@ final class ProCameraEngine: NSObject {
         imuBufferLock.unlock()
     }
 
-    // MARK: - Active Auto-ISO Shutter Cap + Telemetry Timer
+    // MARK: - Orientation Transform & Hardware Shutter Guard Loop
+    private func computeInitialVideoTransform() -> CGAffineTransform {
+        imuBufferLock.lock()
+        let lastAccel = accelRingBuffer.last
+        imuBufferLock.unlock()
+        guard let a = lastAccel else {
+            return .identity
+        }
+        // Native buffer is .landscapeRight (1920x1080). Set display transform only (never rotate ISP pixels!).
+        if abs(a.ay) >= abs(a.ax) {
+            return (a.ay < 0.0)
+                ? CGAffineTransform(rotationAngle: .pi / 2.0)
+                : CGAffineTransform(rotationAngle: -.pi / 2.0)
+        } else {
+            return (a.ax > 0.0)
+                ? CGAffineTransform(rotationAngle: .pi)
+                : .identity
+        }
+    }
+
     private func enforceAntiBlurShutterIfNeeded() {
-        guard isAntiBlurCapEnabled, !isExposureLocked, let dev = videoDevice else { return }
+        let capTimescale = shutterCapTimescale
+        guard isAntiBlurCapEnabled, capTimescale > 0, !isExposureLocked, let dev = videoDevice else { return }
         guard dev.isExposureModeSupported(.custom) else { return }
 
-        let capTimescale: Int32 = (currentMode == .cinema1080p30) ? 120 : 240
         let maxAllowedSec = 1.0 / Double(capTimescale)
         let currentExpSec = CMTimeGetSeconds(dev.exposureDuration)
 
-        // If iOS auto-exposure lengthened shutter beyond cap, or we are actively managing custom exposure:
-        if currentExpSec > maxAllowedSec * 1.05 || dev.exposureMode == .custom {
+        // Enforce hard hardware shutter floor <= 1/capTimescale (e.g., 1/160s = 6.25ms) even indoors
+        if currentExpSec > maxAllowedSec + 0.0003 || dev.exposureMode == .custom {
             let offset = Double(dev.exposureTargetOffset)
             // If bright enough at minISO and clamped shutter, return to continuousAutoExposure for faster shutters
             if dev.exposureMode == .custom && dev.iso <= dev.activeFormat.minISO * 1.05 && offset > 0.35 {
@@ -752,6 +788,14 @@ extension ProCameraEngine: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptu
         didOutput sampleBuffer: CMSampleBuffer,
         from connection: AVCaptureConnection
     ) {
+        if output === videoOutput {
+            shutterGuardFrameCounter += 1
+            if shutterGuardFrameCounter % 3 == 0 && isAntiBlurCapEnabled && !isExposureLocked {
+                sessionQueue.async { [weak self] in
+                    self?.enforceAntiBlurShutterIfNeeded()
+                }
+            }
+        }
         guard isRecording else { return }
 
         if output === videoOutput {

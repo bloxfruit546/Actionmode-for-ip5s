@@ -122,7 +122,8 @@ final class PhotosImporter {
             let fps = Double(videoTrack.nominalFrameRate > 1.0 ? videoTrack.nominalFrameRate : 30.0)
             let durationSec = max(0.1, CMTimeGetSeconds(asset.duration))
             let readoutSec = (fps > 60.0) ? 0.0080 : 0.0152
-            let fx = Double(width) * (1815.0 / 1920.0)
+            let longSide = Double(max(width, height))
+            let fx = longSide * (1815.0 / 1920.0)
             let fy = fx
             let cx = Double(width) * 0.5
             let cy = Double(height) * 0.5
