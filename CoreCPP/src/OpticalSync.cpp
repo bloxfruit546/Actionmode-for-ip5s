@@ -1,4 +1,5 @@
 #include "OpticalSync.hpp"
+#include "FrameWarpCalculator.hpp"
 
 #include <algorithm>
 #include <array>
@@ -143,7 +144,8 @@ bool OpticalSync::estimateVisualOmega(
     double cy,
     double& outWx,
     double& outWy,
-    double& outWz
+    double& outWz,
+    bool motoActionMode
 ) {
     outWx = 0.0;
     outWy = 0.0;
@@ -163,11 +165,14 @@ bool OpticalSync::estimateVisualOmega(
     const std::vector<uint8_t> h0 = downsample2x(f0.luma, w, h, hw, hh);
     const std::vector<uint8_t> h1 = downsample2x(f1.luma, w, h, hw, hh);
 
-    const int margin = 20;
+    const int xMin = motoActionMode ? std::max(20, static_cast<int>(0.15 * w)) : 20;
+    const int xMax = motoActionMode ? std::min(w - 20, static_cast<int>(0.85 * w)) : (w - 20);
+    const int yMin = motoActionMode ? std::max(20, static_cast<int>(0.10 * h)) : 20;
+    const int yMax = motoActionMode ? std::min(h - 20, static_cast<int>(0.48 * h)) : (h - 20);
     const int gridCols = 6;
     const int gridRows = 4;
-    const int cellW = (w - 2 * margin) / gridCols;
-    const int cellH = (h - 2 * margin) / gridRows;
+    const int cellW = std::max(8, (xMax - xMin) / gridCols);
+    const int cellH = std::max(8, (yMax - yMin) / gridRows);
 
     struct FlowObs {
         double x, y, dx, dy;
@@ -179,8 +184,8 @@ bool OpticalSync::estimateVisualOmega(
 
     for (int gy = 0; gy < gridRows; ++gy) {
         for (int gx = 0; gx < gridCols; ++gx) {
-            const int xStart = margin + gx * cellW;
-            const int yStart = margin + gy * cellH;
+            const int xStart = xMin + gx * cellW;
+            const int yStart = yMin + gy * cellH;
 
             int bestU = xStart + cellW / 2;
             int bestV = yStart + cellH / 2;
@@ -332,7 +337,8 @@ bool OpticalSync::estimateVisualOmega(
 OpticalSyncResult OpticalSync::solveSyncAndAxes(
     const std::vector<OpticalFlowFrame>& frames,
     const GFFileHeader& header,
-    const std::vector<GFGyroRecord>& gyroRecords
+    const std::vector<GFGyroRecord>& gyroRecords,
+    bool motoActionMode
 ) {
     OpticalSyncResult result;
     const auto& presets = getAxisPresets();
@@ -366,7 +372,7 @@ OpticalSyncResult OpticalSync::solveSyncAndAxes(
     double visEnergy = 0.0;
     for (size_t i = 1; i < frames.size(); ++i) {
         double wx = 0.0, wy = 0.0, wz = 0.0;
-        if (estimateVisualOmega(frames[i - 1], frames[i], fx, fy, cx, cy, wx, wy, wz)) {
+        if (estimateVisualOmega(frames[i - 1], frames[i], fx, fy, cx, cy, wx, wy, wz, motoActionMode)) {
             const double tMid = 0.5 * (frames[i - 1].timestampSec + frames[i].timestampSec);
             visSamples.push_back({tMid, wx, wy, wz});
             visEnergy += wx * wx + wy * wy + wz * wz;
@@ -685,6 +691,290 @@ OpticalSyncResult OpticalSync::solveSyncAndAxes(
     );
     result.diagnosticMessage = buf;
     return result;
+}
+
+void HybridResidualTracker::reset(const CalibrationProfile& profile, const TrajectoryResult& traj, bool motoActionMode) {
+    profile_ = profile;
+    rawQuats_ = traj.rawFrameQuats;
+    smoothQuats_ = traj.smoothFrameQuats;
+    prevFrame_ = OpticalFlowFrame{};
+    prevQCorr_ = Quat::identity();
+    hasPrev_ = false;
+    motoActionMode_ = motoActionMode;
+    frameIdx_ = 0;
+    deltaU_.clear();
+    deltaV_.clear();
+    deltaU_.reserve(rawQuats_.size());
+    deltaV_.reserve(rawQuats_.size());
+}
+
+void HybridResidualTracker::pushFrame(const OpticalFlowFrame& frame) {
+    if (motoActionMode_) {
+        ++frameIdx_;
+        return;
+    }
+    const size_t nTraj = std::min(rawQuats_.size(), smoothQuats_.size());
+    Quat currQCorr = Quat::identity();
+    if (nTraj > 0) {
+        const size_t qIdx = std::min(frameIdx_, nTraj - 1);
+        currQCorr = (rawQuats_[qIdx].conjugate() * smoothQuats_[qIdx]).normalized();
+    }
+
+    double estDu = 0.0;
+    double estDv = 0.0;
+
+    if (hasPrev_ && frame.width >= 64 && frame.height >= 64 &&
+        frame.width == prevFrame_.width && frame.height == prevFrame_.height &&
+        frame.luma.size() == static_cast<size_t>(frame.width * frame.height) &&
+        prevFrame_.luma.size() == static_cast<size_t>(prevFrame_.width * prevFrame_.height) &&
+        profile_.width > 0 && profile_.height > 0) {
+
+        const int w = frame.width;
+        const int h = frame.height;
+        int hw = 0, hh = 0;
+        const std::vector<uint8_t> h0 = downsample2x(prevFrame_.luma, w, h, hw, hh);
+        const std::vector<uint8_t> h1 = downsample2x(frame.luma, w, h, hw, hh);
+
+        const double scaleX = static_cast<double>(w) / static_cast<double>(profile_.width);
+        const double scaleY = static_cast<double>(h) / static_cast<double>(profile_.height);
+        const double fxS = profile_.fx * scaleX;
+        const double fyS = profile_.fy * scaleY;
+        const double cxS = profile_.cx * scaleX;
+        const double cyS = profile_.cy * scaleY;
+
+        double R0[9], R1[9];
+        FrameWarpCalculator::computeRotationMatrix3x3(prevQCorr_.conjugate(), R0);
+        FrameWarpCalculator::computeRotationMatrix3x3(currQCorr.conjugate(), R1);
+
+        auto projectVirt = [&](double u, double v, const double R[9]) -> std::pair<double, double> {
+            const double xn = (u - cxS) / fxS;
+            const double yn = (v - cyS) / fyS;
+            const double rx = R[0] * xn + R[1] * yn + R[2];
+            const double ry = R[3] * xn + R[4] * yn + R[5];
+            const double rz = R[6] * xn + R[7] * yn + R[8];
+            const double invZ = 1.0 / std::max(0.15, rz);
+            return {fxS * (rx * invZ) + cxS, fyS * (ry * invZ) + cyS};
+        };
+
+        const int margin = 20;
+        const int gridCols = 6;
+        const int gridRows = 4;
+        const int cellW = (w - 2 * margin) / gridCols;
+        const int cellH = (h - 2 * margin) / gridRows;
+
+        std::vector<double> duList;
+        std::vector<double> dvList;
+        duList.reserve(gridCols * gridRows);
+        dvList.reserve(gridCols * gridRows);
+
+        for (int gy = 0; gy < gridRows; ++gy) {
+            for (int gx = 0; gx < gridCols; ++gx) {
+                const int xStart = margin + gx * cellW;
+                const int yStart = margin + gy * cellH;
+
+                int bestU = xStart + cellW / 2;
+                int bestV = yStart + cellH / 2;
+                int bestScore = -1;
+                for (int v = yStart + 2; v < yStart + cellH - 2; v += 2) {
+                    for (int u = xStart + 2; u < xStart + cellW - 2; u += 2) {
+                        const int ix = static_cast<int>(prevFrame_.luma[v * w + u + 1]) - static_cast<int>(prevFrame_.luma[v * w + u - 1]);
+                        const int iy = static_cast<int>(prevFrame_.luma[(v + 1) * w + u]) - static_cast<int>(prevFrame_.luma[(v - 1) * w + u]);
+                        const int score = std::min(std::abs(ix), std::abs(iy));
+                        if (score > bestScore) {
+                            bestScore = score;
+                            bestU = u;
+                            bestV = v;
+                        }
+                    }
+                }
+                if (bestScore < 5) {
+                    continue;
+                }
+
+                const int hu0 = bestU / 2;
+                const int hv0 = bestV / 2;
+                const int cRad = 3;
+                const int cSearch = 12;
+                if (hu0 - cRad - cSearch < 1 || hu0 + cRad + cSearch >= hw - 1 ||
+                    hv0 - cRad - cSearch < 1 || hv0 + cRad + cSearch >= hh - 1) {
+                    continue;
+                }
+
+                int bestHu1 = hu0, bestHv1 = hv0, bestCSad = 1 << 30;
+                for (int dv = -cSearch; dv <= cSearch; ++dv) {
+                    for (int du = -cSearch; du <= cSearch; ++du) {
+                        const int sad = computeSadPatch(h0.data(), hw, h1.data(), hw, hu0, hv0, hu0 + du, hv0 + dv, cRad);
+                        if (sad < bestCSad) {
+                            bestCSad = sad;
+                            bestHu1 = hu0 + du;
+                            bestHv1 = hv0 + dv;
+                        }
+                    }
+                }
+
+                const int fCenterU = bestHu1 * 2;
+                const int fCenterV = bestHv1 * 2;
+                const int fRad = 4;
+                const int fSearch = 3;
+                if (bestU - fRad < 1 || bestU + fRad >= w - 1 ||
+                    bestV - fRad < 1 || bestV + fRad >= h - 1 ||
+                    fCenterU - fRad - fSearch < 1 || fCenterU + fRad + fSearch >= w - 1 ||
+                    fCenterV - fRad - fSearch < 1 || fCenterV + fRad + fSearch >= h - 1) {
+                    continue;
+                }
+
+                int bestFu1 = fCenterU, bestFv1 = fCenterV, bestFSad = 1 << 30;
+                for (int dv = -fSearch; dv <= fSearch; ++dv) {
+                    for (int du = -fSearch; du <= fSearch; ++du) {
+                        const int sad = computeSadPatch(prevFrame_.luma.data(), w, frame.luma.data(), w, bestU, bestV, fCenterU + du, fCenterV + dv, fRad);
+                        if (sad < bestFSad) {
+                            bestFSad = sad;
+                            bestFu1 = fCenterU + du;
+                            bestFv1 = fCenterV + dv;
+                        }
+                    }
+                }
+
+                double subU = static_cast<double>(bestFu1);
+                double subV = static_cast<double>(bestFv1);
+                if (bestFu1 - fRad - 1 >= 0 && bestFu1 + fRad + 1 < w) {
+                    const int sL = computeSadPatch(prevFrame_.luma.data(), w, frame.luma.data(), w, bestU, bestV, bestFu1 - 1, bestFv1, fRad);
+                    const int sR = computeSadPatch(prevFrame_.luma.data(), w, frame.luma.data(), w, bestU, bestV, bestFu1 + 1, bestFv1, fRad);
+                    const double denom = 2.0 * (sL - 2.0 * bestFSad + sR);
+                    if (std::fabs(denom) > 1e-6) {
+                        subU += std::min(0.5, std::max(-0.5, (sL - sR) / denom));
+                    }
+                }
+                if (bestFv1 - fRad - 1 >= 0 && bestFv1 + fRad + 1 < h) {
+                    const int sU = computeSadPatch(prevFrame_.luma.data(), w, frame.luma.data(), w, bestU, bestV, bestFu1, bestFv1 - 1, fRad);
+                    const int sD = computeSadPatch(prevFrame_.luma.data(), w, frame.luma.data(), w, bestU, bestV, bestFu1, bestFv1 + 1, fRad);
+                    const double denom = 2.0 * (sU - 2.0 * bestFSad + sD);
+                    if (std::fabs(denom) > 1e-6) {
+                        subV += std::min(0.5, std::max(-0.5, (sU - sD) / denom));
+                    }
+                }
+
+                const auto p0 = projectVirt(static_cast<double>(bestU), static_cast<double>(bestV), R0);
+                const auto p1 = projectVirt(subU, subV, R1);
+                duList.push_back((p1.first - p0.first) / scaleX);
+                dvList.push_back((p1.second - p0.second) / scaleY);
+            }
+        }
+
+        if (duList.size() >= 4) {
+            std::vector<double> sortedU = duList;
+            std::vector<double> sortedV = dvList;
+            std::sort(sortedU.begin(), sortedU.end());
+            std::sort(sortedV.begin(), sortedV.end());
+            double muU = sortedU[sortedU.size() / 2];
+            double muV = sortedV[sortedV.size() / 2];
+
+            // 3-iteration IRLS Huber mean to reject foreground moving objects
+            for (int iter = 0; iter < 3; ++iter) {
+                double sumW = 0.0, sumU = 0.0, sumV = 0.0;
+                for (size_t k = 0; k < duList.size(); ++k) {
+                    const double err = std::hypot(duList[k] - muU, dvList[k] - muV);
+                    const double wHuber = (err <= 2.5) ? 1.0 : (2.5 / (err + 1e-6));
+                    sumW += wHuber;
+                    sumU += wHuber * duList[k];
+                    sumV += wHuber * dvList[k];
+                }
+                if (sumW > 1e-6) {
+                    muU = sumU / sumW;
+                    muV = sumV / sumW;
+                }
+            }
+            estDu = muU;
+            estDv = muV;
+        }
+    }
+
+    if (hasPrev_) {
+        deltaU_.push_back(estDu);
+        deltaV_.push_back(estDv);
+    }
+
+    prevFrame_ = frame;
+    prevQCorr_ = currQCorr;
+    hasPrev_ = true;
+    ++frameIdx_;
+}
+
+HybridResidualResult HybridResidualTracker::finalize(double nominalFps) const {
+    HybridResidualResult res;
+    const size_t n = std::min(rawQuats_.size(), smoothQuats_.size());
+    if (n < 3 || deltaU_.empty()) {
+        return res;
+    }
+
+    const size_t m = std::min(n, deltaU_.size() + 1);
+    std::vector<double> rawTx(n, 0.0);
+    std::vector<double> rawTy(n, 0.0);
+    for (size_t i = 1; i < m; ++i) {
+        rawTx[i] = rawTx[i - 1] + deltaU_[i - 1];
+        rawTy[i] = rawTy[i - 1] + deltaV_[i - 1];
+    }
+    for (size_t i = m; i < n; ++i) {
+        rawTx[i] = rawTx[m - 1];
+        rawTy[i] = rawTy[m - 1];
+    }
+
+    // Zero-Phase High-Pass Filter (tau = 0.65s -> rejects slow drift, isolates >0.8Hz bounce)
+    const double dt = (nominalFps > 1.0) ? (1.0 / nominalFps) : (1.0 / 30.0);
+    const double alpha = std::exp(-dt / 0.65);
+
+    auto zeroPhaseLowPass = [&](const std::vector<double>& in) -> std::vector<double> {
+        std::vector<double> fwd(n, in[0]);
+        for (size_t i = 1; i < n; ++i) {
+            fwd[i] = alpha * fwd[i - 1] + (1.0 - alpha) * in[i];
+        }
+        std::vector<double> bwd = fwd;
+        for (size_t i = n - 1; i > 0; --i) {
+            const size_t idx = i - 1;
+            bwd[idx] = alpha * bwd[idx + 1] + (1.0 - alpha) * fwd[idx];
+        }
+        return bwd;
+    };
+
+    const std::vector<double> baseTx = zeroPhaseLowPass(rawTx);
+    const std::vector<double> baseTy = zeroPhaseLowPass(rawTy);
+
+    const double maxShiftPx = 60.0 * (static_cast<double>(profile_.height > 0 ? profile_.height : 1080) / 1080.0);
+    res.shiftX.resize(n, 0.0);
+    res.shiftY.resize(n, 0.0);
+
+    double sumSq = 0.0;
+    double maxAmp = 0.0;
+    for (size_t i = 0; i < n; ++i) {
+        const double hpX = rawTx[i] - baseTx[i];
+        const double hpY = rawTy[i] - baseTy[i];
+        const double clampedX = maxShiftPx * std::tanh(hpX / maxShiftPx);
+        const double clampedY = maxShiftPx * std::tanh(hpY / maxShiftPx);
+        res.shiftX[i] = -clampedX;
+        res.shiftY[i] = -clampedY;
+        const double amp = std::hypot(clampedX, clampedY);
+        maxAmp = std::max(maxAmp, amp);
+        sumSq += amp * amp;
+    }
+
+    res.maxAmplitudePx = maxAmp;
+    res.rmsResidualPx = std::sqrt(sumSq / static_cast<double>(n));
+    res.valid = true;
+    return res;
+}
+
+HybridResidualResult OpticalSync::estimateHybridResidualShifts(
+    const std::vector<OpticalFlowFrame>& frames,
+    const CalibrationProfile& profile,
+    const TrajectoryResult& traj,
+    double nominalFps
+) {
+    HybridResidualTracker tracker;
+    tracker.reset(profile, traj);
+    for (const auto& f : frames) {
+        tracker.pushFrame(f);
+    }
+    return tracker.finalize(nominalFps);
 }
 
 } // namespace gf

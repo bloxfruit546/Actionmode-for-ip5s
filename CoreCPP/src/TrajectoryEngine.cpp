@@ -117,11 +117,29 @@ double computeAlphaForAxis(double smoothness, double panActivity, double velocit
     if (s <= 1e-4) {
         return 0.0;
     }
-    // Cinema-grade tauBase: ~1.28s at s=0.65, ~2.53s at s=0.85, 4.00s at s=1.0
-    const double tauBase = 0.02 + 0.90 * s + 3.08 * std::pow(s, 3.5);
+    // Cinema-grade tauBase: ~1.28s at s=0.65, ~2.80s at s=0.85, ~4.16s at s=0.96, 4.50s at s=1.0
+    const double heavyBoost = (s > 0.75) ? (0.50 * std::pow((s - 0.75) / 0.25, 1.3)) : 0.0;
+    const double tauBase = 0.02 + 0.90 * s + 3.08 * std::pow(s, 3.5) + heavyBoost;
     // Only reduce tau during genuine intentional panning (panActivity > 0)
     const double tauEff = tauBase / (1.0 + velocityDamping * panActivity * 4.0);
     return std::exp(-dtF / std::max(tauEff, 1e-4));
+}
+
+void smoothScalarGaussianTwoPass(std::vector<double>& values, double sigmaFrames) {
+    const size_t n = values.size();
+    if (n < 3 || sigmaFrames <= 0.1) {
+        return;
+    }
+    const double alpha = std::exp(-1.0 / sigmaFrames);
+    for (int pass = 0; pass < 2; ++pass) {
+        for (size_t i = 1; i < n; ++i) {
+            values[i] = alpha * values[i - 1] + (1.0 - alpha) * values[i];
+        }
+        for (size_t i = n - 1; i > 0; --i) {
+            const size_t idx = i - 1;
+            values[idx] = alpha * values[idx + 1] + (1.0 - alpha) * values[idx];
+        }
+    }
 }
 
 double computeRollErrorDeg(const Quat& qWC, const Vec3& gWorld, int quadrantDegrees) {
@@ -223,7 +241,8 @@ void TrajectoryEngine::setImuData(
     const GFFileHeader& header,
     const std::vector<GFGyroRecord>& gyroRecords,
     const std::vector<GFAccelRecord>& accelRecords,
-    const double* customAxisMatrix
+    const double* customAxisMatrix,
+    bool motoActionMode
 ) {
     integratedSamples_.clear();
     nominalFps_ = (header.nominal_fps > 1.0) ? header.nominal_fps : 30.0;
@@ -271,10 +290,17 @@ void TrajectoryEngine::setImuData(
     }
     const double avgDt = (nGyro > 1) ? (dtSum / static_cast<double>(nGyro - 1)) : (1.0 / 90.0);
     const double fsEst = 1.0 / std::max(avgDt, 1e-4);
-    if (fsEst > 55.0) {
+    if (motoActionMode) {
+        // Full-bandwidth Nyquist gyro for 20-44Hz road/engine buzz: only filter at 42 Hz if fs > 95 Hz
+        if (fsEst > 95.0) {
+            zeroPhaseButterworthLPF(omegaCamArr, fsEst, 42.0);
+        }
+    } else if (fsEst > 55.0) {
         zeroPhaseButterworthLPF(omegaCamArr, fsEst, 24.0);
     }
 
+    const int subSteps = motoActionMode ? 8 : 4;
+    const double invSub = 1.0 / static_cast<double>(subSteps);
     for (size_t i = 1; i < nGyro; ++i) {
         const double dt = std::min(0.1, std::max(1e-6, dedupGyro[i].timestamp_sec - dedupGyro[i - 1].timestamp_sec));
         const Vec3& w0 = omegaCamArr[(i >= 2) ? (i - 2) : 0];
@@ -283,9 +309,9 @@ void TrajectoryEngine::setImuData(
         const Vec3& w3 = omegaCamArr[(i + 1 < nGyro) ? (i + 1) : (nGyro - 1)];
 
         Quat qSub = qPureGyro[i - 1];
-        const double dtSub = dt * 0.25;
-        for (int s = 0; s < 4; ++s) {
-            const double uMid = (static_cast<double>(s) + 0.5) * 0.25;
+        const double dtSub = dt * invSub;
+        for (int s = 0; s < subSteps; ++s) {
+            const double uMid = (static_cast<double>(s) + 0.5) * invSub;
             const Vec3 wMid = catmullRomVec3(w0, w1, w2, w3, uMid);
             qSub = Quat::integrateGyroStep(qSub, wMid, dtSub);
         }
@@ -303,6 +329,20 @@ void TrajectoryEngine::setImuData(
         std::vector<Vec3> gInertialMeas(nAcc);
         std::vector<double> accWeight(nAcc, 0.001);
         size_t gIdx = 0;
+
+        // Pre-estimate straight-line initial gravity over first 0.5s for cornering yaw-rate detection
+        Vec3 gApproxWorld(0.0, 1.0, 0.0);
+        {
+            const double t0 = sortedAccel.front().timestamp_sec;
+            Vec3 sumA(0.0, 0.0, 0.0);
+            for (const auto& a : sortedAccel) {
+                if (a.timestamp_sec > t0 + 0.5) break;
+                sumA = sumA + applyAxisMatrix(M, Vec3(a.ax, a.ay, a.az));
+            }
+            if (sumA.normSquared() > 1e-6) {
+                gApproxWorld = sumA.normalized();
+            }
+        }
 
         for (size_t k = 0; k < nAcc; ++k) {
             const auto& a = sortedAccel[k];
@@ -322,11 +362,21 @@ void TrajectoryEngine::setImuData(
             }
 
             const double magDev = std::fabs(aNorm - 1.0);
-            double w = 0.001;
-            if (magDev <= 0.08 && jerk <= 4.0) {
-                const double wMag = (magDev <= 0.03) ? 1.0 : (1.0 - (magDev - 0.03) / 0.05);
-                const double wJerk = (jerk <= 1.5) ? 1.0 : (1.0 - (jerk - 1.5) / 2.5);
-                w = std::max(0.001, wMag * wJerk);
+            double w = motoActionMode ? 1e-5 : 0.001;
+            const double maxMagDev = motoActionMode ? 0.05 : 0.08;
+            const double maxJerk = motoActionMode ? 2.0 : 4.0;
+            bool cornering = false;
+            if (motoActionMode) {
+                const Vec3 gCamApprox = qPureGyro[gIdx].conjugate().rotateVector(gApproxWorld).normalized();
+                const double omegaYaw = std::fabs(omegaCamArr[gIdx].dot(gCamApprox));
+                if (omegaYaw > 0.07) {
+                    cornering = true;
+                }
+            }
+            if (!cornering && magDev <= maxMagDev && jerk <= maxJerk) {
+                const double wMag = (magDev <= 0.03) ? 1.0 : (1.0 - (magDev - 0.03) / (maxMagDev - 0.03));
+                const double wJerk = (jerk <= 1.2) ? 1.0 : (1.0 - (jerk - 1.2) / (maxJerk - 1.2));
+                w = std::max(motoActionMode ? 1e-5 : 0.001, wMag * wJerk);
             }
             accWeight[k] = w;
             gInertialMeas[k] = (aNorm > 1e-4) ? qPureGyro[gIdx].rotateVector(aCam * (1.0 / aNorm)) : Vec3(0.0, 1.0, 0.0);
@@ -354,8 +404,8 @@ void TrajectoryEngine::setImuData(
             }
         }
 
-        // Forward-Backward Zero-Phase Weighted LPF (tau_g = 3.0s)
-        const double tauG = 3.0;
+        // Forward-Backward Zero-Phase Weighted LPF (tau_g = 12.0s in MotoMode, 3.0s normal)
+        const double tauG = motoActionMode ? 12.0 : 3.0;
         std::vector<Vec3> gFwd(nAcc, initGravityCam_);
         gFwd[0] = (gInertialMeas[0] * accWeight[0] + initGravityCam_ * (1.0 - accWeight[0])).normalized();
         for (size_t k = 1; k < nAcc; ++k) {
@@ -378,7 +428,8 @@ void TrajectoryEngine::setImuData(
         size_t aIdx = 0;
         integratedSamples_.reserve(nGyro);
         Quat q = Quat::identity();
-        const double kpMahony = 0.35;
+        const double kpMahony = motoActionMode ? 0.25 : 0.35;
+        const double minMahonyWeight = motoActionMode ? 0.50 : 0.20;
 
         for (size_t i = 0; i < nGyro; ++i) {
             const double tG = dedupGyro[i].timestamp_sec;
@@ -392,7 +443,7 @@ void TrajectoryEngine::setImuData(
             if (i > 0) {
                 const double dt = std::min(0.1, std::max(1e-6, tG - dedupGyro[i - 1].timestamp_sec));
                 Vec3 feedback(0.0, 0.0, 0.0);
-                if (accWeight[aIdx] > 0.2 && std::fabs(sortedAccel[aIdx].timestamp_sec - tG) < 0.05) {
+                if (accWeight[aIdx] > minMahonyWeight && std::fabs(sortedAccel[aIdx].timestamp_sec - tG) < 0.05) {
                     const Vec3 aCam = applyAxisMatrix(M, Vec3(sortedAccel[aIdx].ax, sortedAccel[aIdx].ay, sortedAccel[aIdx].az)).normalized();
                     const Vec3 gEst = q.conjugate().rotateVector(gSmooth[aIdx]);
                     feedback = aCam.cross(gEst) * (kpMahony * accWeight[aIdx]);
@@ -401,9 +452,9 @@ void TrajectoryEngine::setImuData(
                 const Vec3& w1 = omegaCamArr[i - 1];
                 const Vec3& w2 = omegaCamArr[i];
                 const Vec3& w3 = omegaCamArr[(i + 1 < nGyro) ? (i + 1) : (nGyro - 1)];
-                const double dtSub = dt * 0.25;
-                for (int s = 0; s < 4; ++s) {
-                    const double uMid = (static_cast<double>(s) + 0.5) * 0.25;
+                const double dtSub = dt * invSub;
+                for (int s = 0; s < subSteps; ++s) {
+                    const double uMid = (static_cast<double>(s) + 0.5) * invSub;
                     const Vec3 wMid = catmullRomVec3(w0, w1, w2, w3, uMid) + feedback;
                     q = Quat::integrateGyroStep(q, wMid, dtSub);
                 }
@@ -527,15 +578,16 @@ TrajectoryResult TrajectoryEngine::solve(
 
     const double dtF = 1.0 / nominalFps_;
 
-    // True Net-Displacement Pan Detector over +-0.45s window:
+    // True Net-Displacement Pan Detector over +-0.50s window:
     // panRatio = D_i / (L_i + 1e-4). Only damp tau when panRatio > 0.65 AND D_i > 12 deg.
-    const int radius = std::max(2, static_cast<int>(std::round(0.45 * nominalFps_)));
+    const int radius = std::max(2, static_cast<int>(std::round(0.50 * nominalFps_)));
     std::vector<double> stepAngles(n, 0.0);
     for (size_t i = 1; i < n; ++i) {
         stepAngles[i] = rotationAngleBetween(result.rawFrameQuats[i - 1], result.rawFrameQuats[i]);
     }
 
     std::vector<double> panActivity(n, 0.0);
+    std::vector<double> panRatioArr(n, 0.0);
     double panRatioSum = 0.0;
     const double minNetDispRad = 12.0 * (kPi / 180.0);
 
@@ -548,6 +600,7 @@ TrajectoryResult TrajectoryEngine::solve(
         }
         const double netDisp = rotationAngleBetween(result.rawFrameQuats[lo], result.rawFrameQuats[hi]);
         const double ratio = netDisp / (pathLen + 1e-4);
+        panRatioArr[i] = std::min(1.0, std::max(0.0, ratio));
         panRatioSum += ratio;
 
         if (ratio > 0.65 && netDisp > minNetDispRad) {
@@ -559,21 +612,27 @@ TrajectoryResult TrajectoryEngine::solve(
     const double pSmooth = config.pitchSmoothness;
     const double ySmooth = config.yawSmoothness;
     const double rSmooth = config.rollSmoothness;
+    const double maxSmooth = std::max(pSmooth, std::max(ySmooth, rSmooth));
 
     if (pSmooth <= 1e-4 && ySmooth <= 1e-4 && rSmooth <= 1e-4 && !config.horizonLockEnabled) {
         result.smoothFrameQuats = result.rawFrameQuats;
     } else {
-        // 3-Pass Forward-Backward Zero-Phase Smoother (Gaussian-like C^3 smoothness)
+        // 3-Pass (or 4-Pass for Heavy Action smoothness > 0.75) Forward-Backward Zero-Phase Smoother
+        const int numPasses = (maxSmooth > 0.75) ? 4 : 3;
         std::vector<Quat> current = result.rawFrameQuats;
         std::vector<Quat> qFwd(n);
         std::vector<Quat> qBwd(n);
 
-        for (int pass = 0; pass < 3; ++pass) {
+        for (int pass = 0; pass < numPasses; ++pass) {
             qFwd[0] = current[0];
             for (size_t i = 1; i < n; ++i) {
-                const double aPitch = computeAlphaForAxis(pSmooth, panActivity[i], config.velocityDamping, dtF);
-                const double aYaw = computeAlphaForAxis(ySmooth, panActivity[i], config.velocityDamping, dtF);
-                const double aRoll = computeAlphaForAxis(rSmooth, panActivity[i], config.velocityDamping, dtF);
+                const double yawTurnActivity = config.motoActionMode
+                    ? std::max(panActivity[i], std::min(1.0, std::max(0.0, (panRatioArr[i] - 0.60) / 0.25)))
+                    : panActivity[i];
+                const double pitchActivity = config.motoActionMode ? (panActivity[i] * 0.25) : panActivity[i];
+                const double aPitch = computeAlphaForAxis(pSmooth, pitchActivity, config.velocityDamping, dtF);
+                const double aYaw = computeAlphaForAxis(ySmooth, yawTurnActivity, config.velocityDamping, dtF);
+                const double aRoll = computeAlphaForAxis(rSmooth, pitchActivity, config.velocityDamping, dtF);
 
                 const Vec3 rDiff = quatLog(qFwd[i - 1].conjugate() * current[i]);
                 const Vec3 rStep(
@@ -587,9 +646,13 @@ TrajectoryResult TrajectoryEngine::solve(
             qBwd[n - 1] = qFwd[n - 1];
             for (size_t i = n - 1; i > 0; --i) {
                 const size_t idx = i - 1;
-                const double aPitch = computeAlphaForAxis(pSmooth, panActivity[idx], config.velocityDamping, dtF);
-                const double aYaw = computeAlphaForAxis(ySmooth, panActivity[idx], config.velocityDamping, dtF);
-                const double aRoll = computeAlphaForAxis(rSmooth, panActivity[idx], config.velocityDamping, dtF);
+                const double yawTurnActivity = config.motoActionMode
+                    ? std::max(panActivity[idx], std::min(1.0, std::max(0.0, (panRatioArr[idx] - 0.60) / 0.25)))
+                    : panActivity[idx];
+                const double pitchActivity = config.motoActionMode ? (panActivity[idx] * 0.25) : panActivity[idx];
+                const double aPitch = computeAlphaForAxis(pSmooth, pitchActivity, config.velocityDamping, dtF);
+                const double aYaw = computeAlphaForAxis(ySmooth, yawTurnActivity, config.velocityDamping, dtF);
+                const double aRoll = computeAlphaForAxis(rSmooth, pitchActivity, config.velocityDamping, dtF);
 
                 const Vec3 rDiff = quatLog(qBwd[idx + 1].conjugate() * qFwd[idx]);
                 const Vec3 rStep(
@@ -648,12 +711,43 @@ TrajectoryResult TrajectoryEngine::solve(
         result.smoothFrameQuats = std::move(polished);
     }
 
-    // Separate Swing-Lag Limit (1:1 up to 7 deg, smooth tanh saturation to 11 deg) vs Full Roll Lock (-180..+180 deg)
-    // Prevents perspective w -> 0 / lens fold-over during fast whip-pans with zero distortion on <=7 deg shakes.
-    const double kneeRad = 7.0 * (kPi / 180.0);
-    const double headroomRad = 4.0 * (kPi / 180.0);
+    // Pan-Adaptive Swing-Lag Limiter (Dynamic Shake-vs-Pan Excursion Ceiling)
+    // Pure heavy shake (panRatio < 0.30, smoothness >= 0.80): knee=18.0 deg, maxCap=24.5 deg
+    // Intentional pan (panRatio > 0.65): knee=8.0 deg, maxCap=12.5 deg
+    const double smoothFactor = std::min(1.0, std::max(0.0, (std::max(pSmooth, ySmooth) - 0.50) / 0.30));
+    const double zoomScale = (config.maxZoomLimit > 1.0 && config.maxZoomLimit < 1.45)
+        ? std::max(0.45, (config.maxZoomLimit - 1.0) / 0.45)
+        : 1.0;
+
+    std::vector<double> kneeDegArr(n, 7.0);
+    std::vector<double> maxCapDegArr(n, 11.0);
+    const double targetShakeKnee = config.motoActionMode ? 19.5 : 18.0;
+    const double targetShakeCap = config.motoActionMode ? 26.0 : 24.5;
+    const double panStartRatio = config.motoActionMode ? 0.35 : 0.30;
+    const double panSpanRatio = config.motoActionMode ? 0.30 : 0.35;
+    for (size_t i = 0; i < n; ++i) {
+        const double shakeKnee = 7.0 + smoothFactor * (targetShakeKnee - 7.0);
+        const double shakeCap = 11.0 + smoothFactor * (targetShakeCap - 11.0);
+        const double panKnee = 7.0 + smoothFactor * (8.0 - 7.0);
+        const double panCap = 11.0 + smoothFactor * (12.5 - 11.0);
+
+        const double tPan = std::min(1.0, std::max(0.0, (panRatioArr[i] - panStartRatio) / panSpanRatio));
+        const double rawKnee = shakeKnee + tPan * (panKnee - shakeKnee);
+        const double rawCap = shakeCap + tPan * (panCap - shakeCap);
+
+        kneeDegArr[i] = 7.0 + zoomScale * (rawKnee - 7.0);
+        maxCapDegArr[i] = 11.0 + zoomScale * (rawCap - 11.0);
+    }
+    smoothScalarGaussianTwoPass(kneeDegArr, 10.0);
+    smoothScalarGaussianTwoPass(maxCapDegArr, 10.0);
+
+    double maxSwingCap = 0.0;
     const Vec3 zAxis(0.0, 0.0, 1.0);
     for (size_t i = 0; i < n; ++i) {
+        maxSwingCap = std::max(maxSwingCap, maxCapDegArr[i]);
+        const double kneeRad = kneeDegArr[i] * (kPi / 180.0);
+        const double headroomRad = std::max(0.5, maxCapDegArr[i] - kneeDegArr[i]) * (kPi / 180.0);
+
         const Quat qCorr = (result.rawFrameQuats[i].conjugate() * result.smoothFrameQuats[i]).normalized();
         Quat qSwing, qTwist;
         Quat::decomposeSwingTwist(qCorr, zAxis, qSwing, qTwist);
@@ -673,6 +767,7 @@ TrajectoryResult TrajectoryEngine::solve(
             }
         }
     }
+    result.maxSwingCapDeg = maxSwingCap;
 
     result.rawAngularAccelRms = computeAngularAccelRms(result.rawFrameQuats, dtF);
     result.smoothAngularAccelRms = computeAngularAccelRms(result.smoothFrameQuats, dtF);

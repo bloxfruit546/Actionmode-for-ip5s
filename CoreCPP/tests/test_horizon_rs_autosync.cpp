@@ -847,8 +847,8 @@ void testFastPanSwingLagLimit() {
 
     const auto traj = engine.solve(frames, cfg);
     assert(traj.valid);
-    // Swing-lag limiter must compress Pitch/Yaw lag <= 11.1 deg even with velocityDamping=0
-    assert(traj.maxCorrectionDeg <= 11.1);
+    // Pan-adaptive swing-lag limiter must compress 60 deg whip-pan lag within 24.5 deg ceiling even with velocityDamping=0
+    assert(traj.maxCorrectionDeg <= 24.6);
 
     const auto prof = gf::CalibrationProfile::defaultIPhone5s1080p30();
     const auto warp = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
@@ -1035,6 +1035,404 @@ void testVirtualGyroRansacMovingObjectImmunity() {
                 avgWy, trueWy, vres.meanInlierRatio * 100.0);
 }
 
+void testExtremeHighAmplitudeShake18Deg5Hz() {
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.width = 1920;
+    hdr.height = 1080;
+    hdr.nominal_fps = 30.0;
+
+    // +-18.0 deg @ 5Hz violent shake on both Pitch and Yaw (36 deg peak-to-peak!)
+    const int nImu = 360; // 4.0s @ 90Hz
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    const double ampRad = 18.0 * (kPi / 180.0);
+    const double wFreq = 2.0 * kPi * 5.0;
+
+    // Default LandscapeLeft matrix: camX = -gy, camY = -gx, camZ = -gz
+    for (int i = 0; i < nImu; ++i) {
+        const double t = 1.0 + i / 90.0;
+        const double dAngle = ampRad * wFreq * std::cos(wFreq * (t - 1.0));
+        gyro.push_back({t, -dAngle * 0.707, -dAngle * 0.707, 0.0});
+        accel.push_back({t, 0.0f, -1.0f, 0.0f});
+    }
+
+    std::vector<gf::GFFrameRecord> frames;
+    for (int f = 0; f < 120; ++f) {
+        frames.push_back({static_cast<uint32_t>(f), 1.0 + f / 30.0, 0.0, 100.0f, 0.7f, 0.0152f});
+    }
+
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel);
+
+    gf::StabilizerConfig cfg;
+    cfg.pitchSmoothness = 0.96;
+    cfg.yawSmoothness = 0.96;
+    cfg.rollSmoothness = 0.98;
+    cfg.maxZoomLimit = 2.20;
+    cfg.horizonLockEnabled = true;
+    cfg.horizonLockAmount = 1.0;
+
+    const auto traj = engine.solve(frames, cfg);
+    assert(traj.valid);
+    assert(traj.avgPanRatio < 0.20);
+    assert(traj.maxSwingCapDeg > 20.0);
+
+    // Check residual output angle in interior [15..105] relative to mean orientation
+    double maxOutErrDeg = 0.0;
+    const gf::Quat qRef = traj.smoothFrameQuats[60];
+    for (size_t i = 15; i <= 105; ++i) {
+        gf::Quat dq = (qRef.conjugate() * traj.smoothFrameQuats[i]).normalized();
+        if (dq.w < 0.0) dq = gf::Quat(-dq.w, -dq.x, -dq.y, -dq.z);
+        const double deg = 2.0 * std::acos(std::min(1.0, std::max(-1.0, dq.w))) * (180.0 / kPi);
+        maxOutErrDeg = std::max(maxOutErrDeg, deg);
+    }
+    assert(maxOutErrDeg < 0.40);
+
+    const auto profile = gf::CalibrationProfile::defaultIPhone5s1080p30();
+    const auto warp = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
+        engine, traj, profile, 30.0, cfg.maxZoomLimit, false, true
+    );
+    assert(warp.packets.size() == 120);
+
+    // Verify 0% black borders across all 120 frames
+    for (size_t i = 0; i < warp.packets.size(); ++i) {
+        const float* H = warp.packets[i].m;
+        const double corners[4][2] = {{0.0, 0.0}, {1919.0, 0.0}, {1919.0, 1079.0}, {0.0, 1079.0}};
+        for (const auto& c : corners) {
+            const double w = H[6] * c[0] + H[7] * c[1] + H[8];
+            assert(w > 0.25);
+            const double us = (H[0] * c[0] + H[1] * c[1] + H[2]) / w;
+            const double vs = (H[3] * c[0] + H[4] * c[1] + H[5]) / w;
+            assert(us >= 0.0 && us <= 1919.0 && vs >= 0.0 && vs <= 1079.0);
+        }
+    }
+
+    std::printf("Test G (+-18 deg @ 5Hz Heavy Shake -> panRatio=%.3f, swingCap=%.1f deg, outErr=%.3f deg, maxZoom=%.2fx) PASSED.\n",
+                traj.avgPanRatio, traj.maxSwingCapDeg, maxOutErrDeg, warp.maxZoom);
+}
+
+void testHybridOpticalResidualTranslationalBounce() {
+    const int w = 480;
+    const int h = 270;
+    const int nFrames = 45; // 1.5s @ 30fps
+    const auto profile = gf::CalibrationProfile::defaultIPhone5s1080p30();
+
+    // Zero gyro rotation
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.width = 1920;
+    hdr.height = 1080;
+    hdr.nominal_fps = 30.0;
+
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    for (int i = 0; i < 135; ++i) {
+        const double t = i / 90.0;
+        gyro.push_back({t, 0.0, 0.0, 0.0});
+        accel.push_back({t, 0.0f, -1.0f, 0.0f});
+    }
+    std::vector<gf::GFFrameRecord> scFrames;
+    for (int f = 0; f < nFrames; ++f) {
+        scFrames.push_back({static_cast<uint32_t>(f), f / 30.0, 0.0, 100.0f, 0.7f, 0.0});
+    }
+
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel);
+    gf::StabilizerConfig cfg;
+    cfg.pitchSmoothness = 0.85;
+    cfg.yawSmoothness = 0.85;
+    cfg.rollSmoothness = 0.90;
+    const auto traj = engine.solve(scFrames, cfg);
+    assert(traj.valid);
+
+    // Pure translational vertical bounce: +-20 px in 1080p (= +-5.0 px in 480x270) at 6 Hz
+    std::vector<gf::OpticalFlowFrame> frames;
+    std::vector<double> trueBounce1080(nFrames, 0.0);
+    for (int f = 0; f < nFrames; ++f) {
+        const double t = f / 30.0;
+        const double shift1080Y = 20.0 * std::sin(2.0 * kPi * 6.0 * t);
+        trueBounce1080[f] = shift1080Y;
+        const double shiftSmallY = shift1080Y * (static_cast<double>(h) / 1080.0);
+
+        gf::OpticalFlowFrame frame;
+        frame.timestampSec = t;
+        frame.width = w;
+        frame.height = h;
+        frame.luma.resize(static_cast<size_t>(w * h));
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const double wx = static_cast<double>(x);
+                const double wy = static_cast<double>(y) - shiftSmallY;
+                // Non-periodic multi-scale texture (avoids periodic aliasing in block matching)
+                double val = 128.0
+                    + 28.0 * std::sin(wx * 0.043 + wy * 0.031)
+                    + 24.0 * std::cos(wx * 0.097 - wy * 0.073)
+                    + 20.0 * std::sin((wx * wx * 0.0007) + wy * 0.17)
+                    + 18.0 * std::cos(wx * 0.19 + (wy * wy * 0.0011));
+                frame.luma[static_cast<size_t>(y * w + x)] =
+                    static_cast<uint8_t>(std::max(0.0, std::min(255.0, val)));
+            }
+        }
+        frames.push_back(std::move(frame));
+    }
+
+    const auto hr = gf::OpticalSync::estimateHybridResidualShifts(frames, profile, traj, 30.0);
+    assert(hr.valid);
+    assert(hr.shiftY.size() == static_cast<size_t>(nFrames));
+    assert(hr.maxAmplitudePx > 14.0);
+
+    // Residual vertical bounce after applying hr.shiftY in interior [10..35]
+    double maxResidualPx = 0.0;
+    for (int f = 10; f <= 35; ++f) {
+        const double residual = std::fabs(trueBounce1080[f] + hr.shiftY[f]);
+        maxResidualPx = std::max(maxResidualPx, residual);
+    }
+    std::fprintf(stderr, "Test H debug: detectedMax=%.2f px, maxResidualPx=%.2f px, mid=(true=%.2f, shift=%.2f)\n",
+                 hr.maxAmplitudePx, maxResidualPx, trueBounce1080[22], hr.shiftY[22]);
+    assert(maxResidualPx < 3.0);
+
+    const auto warp = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
+        engine, traj, profile, 30.0, 0.0, false, true, &hr.shiftX, &hr.shiftY
+    );
+    assert(warp.packets.size() == static_cast<size_t>(nFrames));
+    for (size_t i = 0; i < warp.packets.size(); ++i) {
+        const float* H = warp.packets[i].m;
+        const double corners[4][2] = {{0.0, 0.0}, {1919.0, 0.0}, {1919.0, 1079.0}, {0.0, 1079.0}};
+        for (const auto& c : corners) {
+            const double wVal = H[6] * c[0] + H[7] * c[1] + H[8];
+            const double us = (H[0] * c[0] + H[1] * c[1] + H[2]) / wVal;
+            const double vs = (H[3] * c[0] + H[4] * c[1] + H[5]) / wVal;
+            assert(us >= 0.0 && us <= 1919.0 && vs >= 0.0 && vs <= 1079.0);
+        }
+    }
+
+    std::printf("Test H (Hybrid Optical Residual +-20px @ 6Hz Bounce -> detectedMax=%.2f px, residual=%.2f px, maxZoom=%.2fx) PASSED.\n",
+                hr.maxAmplitudePx, maxResidualPx, warp.maxZoom);
+}
+
+void testMotoCorneringCentripetalHorizonLock() {
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.width = 1920;
+    hdr.height = 1080;
+    hdr.nominal_fps = 30.0;
+
+    // 10.0s @ 90Hz: 0..2s straight, 2..7s leaning 30 deg + turning 18 deg/s (90 deg total), 7..10s straight
+    const int nImu = 900;
+    const double dtImu = 1.0 / 90.0;
+    auto trueQuatAt = [](double t) -> gf::Quat {
+        double yawRad = 0.0;
+        if (t > 2.0 && t < 7.0) {
+            yawRad = (18.0 * (kPi / 180.0)) * (t - 2.0);
+        } else if (t >= 7.0) {
+            yawRad = 90.0 * (kPi / 180.0);
+        }
+        double rollDeg = 0.0;
+        if (t >= 2.0 && t < 2.5) {
+            rollDeg = 30.0 * (t - 2.0) / 0.5;
+        } else if (t >= 2.5 && t <= 6.5) {
+            rollDeg = 30.0;
+        } else if (t > 6.5 && t < 7.0) {
+            rollDeg = 30.0 * (7.0 - t) / 0.5;
+        }
+        const double rollRad = rollDeg * (kPi / 180.0);
+        return (gf::Quat::fromAxisAngle({0.0, 1.0, 0.0}, yawRad) *
+                gf::Quat::fromAxisAngle({0.0, 0.0, 1.0}, rollRad)).normalized();
+    };
+
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    for (int i = 0; i < nImu; ++i) {
+        const double t = i * dtImu;
+        const gf::Quat q0 = trueQuatAt(std::max(0.0, t - 0.5 * dtImu));
+        const gf::Quat q1 = trueQuatAt(t + 0.5 * dtImu);
+        gf::Quat dq = (q0.conjugate() * q1).normalized();
+        if (dq.w < 0.0) dq = gf::Quat(-dq.w, -dq.x, -dq.y, -dq.z);
+        const double vNorm = std::sqrt(dq.x * dq.x + dq.y * dq.y + dq.z * dq.z);
+        gf::Vec3 omegaCam(0.0, 0.0, 0.0);
+        if (vNorm > 1e-9) {
+            const double ang = 2.0 * std::atan2(vNorm, std::min(1.0, dq.w));
+            omegaCam = gf::Vec3(dq.x, dq.y, dq.z) * (ang / (vNorm * dtImu));
+        }
+        // LandscapeLeft inverse: gx = -camY, gy = -camX, gz = -camZ
+        gyro.push_back({t, -omegaCam.y, -omegaCam.x, -omegaCam.z});
+
+        // Apparent gravity + centripetal acceleration in camera frame:
+        // During 2..7s turn, bike leans 30 deg so apparent gravity points straight down bike frame (0, +1.15g, 0)!
+        gf::Vec3 aCam = (t >= 2.0 && t <= 7.0)
+            ? gf::Vec3(0.0, 1.15, 0.0)
+            : q1.conjugate().rotateVector(gf::Vec3(0.0, 1.0, 0.0));
+        accel.push_back({t, static_cast<float>(-aCam.y), static_cast<float>(-aCam.x), static_cast<float>(-aCam.z)});
+    }
+
+    std::vector<gf::GFFrameRecord> frames;
+    for (int f = 0; f < 300; ++f) {
+        frames.push_back({static_cast<uint32_t>(f), f / 30.0, 0.0, 100.0f, 0.88f, 0.0152f});
+    }
+
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel, nullptr, true);
+
+    gf::StabilizerConfig cfg;
+    cfg.pitchSmoothness = 0.94;
+    cfg.yawSmoothness = 0.72;
+    cfg.rollSmoothness = 0.98;
+    cfg.horizonLockEnabled = true;
+    cfg.horizonLockAmount = 1.0;
+    cfg.motoActionMode = true;
+
+    const auto traj = engine.solve(frames, cfg);
+    assert(traj.valid);
+
+    // Check output roll error against TRUE world gravity (0, 1, 0) during the 5s 30-deg leaning turn!
+    double maxTrueRollErrDeg = 0.0;
+    for (size_t f = 60; f <= 210; ++f) {
+        const gf::Quat& q = traj.smoothFrameQuats[f];
+        const gf::Vec3 rightW = q.rotateVector({1.0, 0.0, 0.0}).normalized();
+        const gf::Vec3 downW = q.rotateVector({0.0, 1.0, 0.0}).normalized();
+        const gf::Vec3 fwdW = q.rotateVector({0.0, 0.0, 1.0}).normalized();
+        gf::Vec3 gProj = gf::Vec3(0.0, 1.0, 0.0) - fwdW * fwdW.y;
+        if (gProj.normSquared() > 1e-6) {
+            gProj = gProj.normalized();
+            const double errDeg = std::fabs(std::atan2(gProj.dot(rightW), gProj.dot(downW)) * (180.0 / kPi));
+            maxTrueRollErrDeg = std::max(maxTrueRollErrDeg, errDeg);
+        }
+    }
+    assert(maxTrueRollErrDeg < 0.50);
+
+    // Verify Yaw smoothly followed the ~90 deg turn by t=8.5s (frame 255)
+    const gf::Vec3 fwdEnd = traj.smoothFrameQuats[255].rotateVector({0.0, 0.0, 1.0}).normalized();
+    const double yawEndDeg = std::atan2(fwdEnd.x, fwdEnd.z) * (180.0 / kPi);
+    assert(yawEndDeg > 80.0 && yawEndDeg < 100.0);
+
+    std::printf("Test Moto 1 (30 deg Lean + 1.15g Centripetal 5s Turn -> maxTrueRollErr=%.3f deg, yawEnd=%.1f deg) PASSED.\n",
+                maxTrueRollErrDeg, yawEndDeg);
+}
+
+void testMotoEngineBuzz32HzPotholeAndRoadParallax() {
+    const int w = 480;
+    const int h = 270;
+    const int nFrames = 60; // 2.0s @ 30fps
+    const auto profile = gf::CalibrationProfile::defaultIPhone5s1080p30();
+    const double sX = static_cast<double>(w) / 1920.0;
+    const double sY = static_cast<double>(h) / 1080.0;
+    const double fxS = profile.fx * sX;
+    const double fyS = profile.fy * sY;
+    const double cxS = profile.cx * sX;
+    const double cyS = profile.cy * sY;
+
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.width = 1920;
+    hdr.height = 1080;
+    hdr.nominal_fps = 30.0;
+    hdr.lens_fx = profile.fx;
+    hdr.lens_fy = profile.fy;
+    hdr.lens_cx = profile.cx;
+    hdr.lens_cy = profile.cy;
+
+    // Combine camera pan + 16 deg pothole impulse + 32 Hz engine buzz
+    auto pitchAt = [](double t) -> double {
+        const double pothole = 16.0 * (kPi / 180.0) * std::exp(-std::pow((t - 1.0) / 0.22, 2.0));
+        const double buzz = 0.20 * (kPi / 180.0) * std::sin(2.0 * kPi * 32.0 * t);
+        return pothole + buzz;
+    };
+    auto yawAt = [](double t) -> double {
+        return 0.18 * t;
+    };
+
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    const double dtImu = 1.0 / 90.0;
+    for (int i = 0; i < 180; ++i) {
+        const double t = i * dtImu;
+        const double dPitch = (pitchAt(t + 1e-4) - pitchAt(t - 1e-4)) / 2e-4;
+        const double dYaw = (yawAt(t + 1e-4) - yawAt(t - 1e-4)) / 2e-4;
+        // LandscapeLeft: wxCam = dPitch, wyCam = dYaw -> gx = -wyCam, gy = -wxCam
+        gyro.push_back({t, -dYaw, -dPitch, 0.0});
+        accel.push_back({t, 0.0f, -1.0f, 0.0f});
+    }
+
+    std::vector<gf::GFFrameRecord> scFrames;
+    std::vector<gf::OpticalFlowFrame> visFrames;
+    for (int f = 0; f < nFrames; ++f) {
+        const double t = f / 30.0;
+        scFrames.push_back({static_cast<uint32_t>(f), t, 0.0, 100.0f, 0.88f, 0.0152f});
+
+        const double p = pitchAt(t);
+        const double yAng = yawAt(t);
+        gf::OpticalFlowFrame frame;
+        frame.timestampSec = t;
+        frame.width = w;
+        frame.height = h;
+        frame.luma.resize(static_cast<size_t>(w * h));
+        for (int py = 0; py < h; ++py) {
+            for (int px = 0; px < w; ++px) {
+                double sx, sy;
+                if (py < static_cast<int>(0.55 * h)) {
+                    // Upper 55%: far-field scenery rotating cleanly with camera
+                    sx = (static_cast<double>(px) - cxS) + yAng * fxS;
+                    sy = (static_cast<double>(py) - cyS) - p * fyS;
+                } else {
+                    // Lower 45%: high-speed foreground road rushing downward (+12 px/frame)!
+                    sx = static_cast<double>(px);
+                    sy = static_cast<double>(py) - static_cast<double>(f) * 12.0;
+                }
+                const double val = 128.0
+                    + 30.0 * std::sin(sx * 0.047 + sy * 0.037)
+                    + 25.0 * std::cos(sx * 0.091 - sy * 0.067)
+                    + 20.0 * std::sin((sx * sx * 0.0006) + sy * 0.15);
+                frame.luma[static_cast<size_t>(py * w + px)] =
+                    static_cast<uint8_t>(std::max(0.0, std::min(255.0, val)));
+            }
+        }
+        visFrames.push_back(std::move(frame));
+    }
+
+    const auto syncRes = gf::OpticalSync::solveSyncAndAxes(visFrames, hdr, gyro, true);
+    assert(syncRes.valid);
+    assert(syncRes.bestNCC > 0.90);
+
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel, syncRes.axisMatrix, true);
+    gf::StabilizerConfig cfg;
+    cfg.pitchSmoothness = 0.94;
+    cfg.yawSmoothness = 0.72;
+    cfg.rollSmoothness = 0.98;
+    cfg.horizonLockEnabled = true;
+    cfg.motoActionMode = true;
+    cfg.timeOffsetMs = syncRes.bestOffsetMs;
+
+    const auto traj = engine.solve(scFrames, cfg);
+    assert(traj.valid);
+
+    // Check that 16 deg pothole + 32 Hz buzz on Pitch is suppressed > 95% (peak-to-peak variation < 0.8 deg)
+    double minPitchDeg = 1e9;
+    double maxPitchDeg = -1e9;
+    for (size_t f = 10; f < 50; ++f) {
+        const gf::Vec3 fwd = traj.smoothFrameQuats[f].rotateVector({0.0, 0.0, 1.0}).normalized();
+        const double pitchDeg = std::asin(std::max(-1.0, std::min(1.0, -fwd.y))) * (180.0 / kPi);
+        minPitchDeg = std::min(minPitchDeg, pitchDeg);
+        maxPitchDeg = std::max(maxPitchDeg, pitchDeg);
+    }
+    const double maxPitchErrDeg = maxPitchDeg - minPitchDeg;
+    assert(maxPitchErrDeg < 0.80);
+
+    const auto warp = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
+        engine, traj, profile, 30.0, 0.0, true, true
+    );
+    assert(warp.frameLUTs.size() == static_cast<size_t>(nFrames));
+    static_assert(sizeof(warp.frameLUTs[0].sliceH) == 64 * 9 * sizeof(float), "64 RS slices expected");
+
+    std::printf("Test Moto 2 (Far-Field ROI NCC=%.3f | 16deg Pothole + 32Hz Buzz -> pitchErr=%.3f deg, 64-Slice RS) PASSED.\n",
+                syncRes.bestNCC, maxPitchErrDeg);
+}
+
 } // namespace
 
 int main() {
@@ -1051,5 +1449,9 @@ int main() {
     testFastPanSwingLagLimit();
     testEffectiveFocalScaleAndCubicMicroJitter();
     testVirtualGyroRansacMovingObjectImmunity();
+    testExtremeHighAmplitudeShake18Deg5Hz();
+    testHybridOpticalResidualTranslationalBounce();
+    testMotoCorneringCentripetalHorizonLock();
+    testMotoEngineBuzz32HzPotholeAndRoadParallax();
     return 0;
 }

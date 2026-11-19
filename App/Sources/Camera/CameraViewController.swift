@@ -25,6 +25,20 @@ final class CameraViewController: UIViewController {
         return label
     }()
 
+    private let shutterWarningLabel: UILabel = {
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = UIFont(name: "Menlo-Bold", size: 10) ?? UIFont.monospacedDigitSystemFont(ofSize: 10, weight: .bold)
+        label.textColor = UIColor(red: 1.0, green: 0.65, blue: 0.15, alpha: 1.0)
+        label.backgroundColor = UIColor(red: 0.25, green: 0.12, blue: 0.0, alpha: 0.80)
+        label.textAlignment = .center
+        label.layer.cornerRadius = 5
+        label.clipsToBounds = true
+        label.text = "LOW SHUTTER (MOTION BLUR RISK) - Recommend <=1/120s"
+        label.isHidden = true
+        return label
+    }()
+
     private let modeControl: UISegmentedControl = {
         let sc = UISegmentedControl(items: ["1080p30", "720p120"])
         sc.translatesAutoresizingMaskIntoConstraints = false
@@ -76,6 +90,32 @@ final class CameraViewController: UIViewController {
         return btn
     }()
 
+    private let motoModeBtn: UIButton = {
+        let btn = UIButton(type: .system)
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        btn.setTitle("MOTO: OFF", for: .normal)
+        btn.setTitleColor(.white, for: .normal)
+        btn.titleLabel?.font = UIFont.systemFont(ofSize: 11, weight: .heavy)
+        btn.backgroundColor = UIColor(white: 0.18, alpha: 0.85)
+        btn.layer.cornerRadius = 6
+        return btn
+    }()
+
+    private let motoBannerLabel: UILabel = {
+        let label = UILabel()
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = UIFont(name: "Menlo-Bold", size: 9.5) ?? UIFont.systemFont(ofSize: 9.5, weight: .bold)
+        label.textColor = UIColor(red: 1.0, green: 0.88, blue: 0.35, alpha: 1.0)
+        label.backgroundColor = UIColor(red: 0.55, green: 0.16, blue: 0.05, alpha: 0.88)
+        label.textAlignment = .center
+        label.layer.cornerRadius = 5
+        label.clipsToBounds = true
+        label.numberOfLines = 2
+        label.text = "Safety: Use Chest-Mount or Passenger Hold. Focus Locked @ Hyperfocal, Shutter <=1/250s."
+        label.isHidden = true
+        return label
+    }()
+
     private let recStatusLabel: UILabel = {
         let label = UILabel()
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -112,6 +152,7 @@ final class CameraViewController: UIViewController {
         focusLockBtn.addTarget(self, action: #selector(handleToggleFocus), for: .touchUpInside)
         expLockBtn.addTarget(self, action: #selector(handleToggleExp), for: .touchUpInside)
         antiBlurBtn.addTarget(self, action: #selector(handleToggleAntiBlur), for: .touchUpInside)
+        motoModeBtn.addTarget(self, action: #selector(handleToggleMotoMode), for: .touchUpInside)
         recordButton.addTarget(self, action: #selector(handleRecordTap), for: .touchUpInside)
     }
 
@@ -145,12 +186,14 @@ final class CameraViewController: UIViewController {
         view.addSubview(modeControl)
         view.addSubview(bitrateControl)
 
-        let lockRow = UIStackView(arrangedSubviews: [focusLockBtn, expLockBtn, antiBlurBtn])
+        let lockRow = UIStackView(arrangedSubviews: [focusLockBtn, expLockBtn, antiBlurBtn, motoModeBtn])
         lockRow.translatesAutoresizingMaskIntoConstraints = false
         lockRow.axis = .horizontal
         lockRow.spacing = 6
         lockRow.distribution = .fillEqually
         view.addSubview(lockRow)
+        view.addSubview(shutterWarningLabel)
+        view.addSubview(motoBannerLabel)
 
         view.addSubview(recStatusLabel)
         view.addSubview(recordButton)
@@ -181,6 +224,16 @@ final class CameraViewController: UIViewController {
             lockRow.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 8),
             lockRow.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -8),
             lockRow.heightAnchor.constraint(equalToConstant: 30),
+
+            shutterWarningLabel.topAnchor.constraint(equalTo: lockRow.bottomAnchor, constant: 6),
+            shutterWarningLabel.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 8),
+            shutterWarningLabel.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -8),
+            shutterWarningLabel.heightAnchor.constraint(equalToConstant: 20),
+
+            motoBannerLabel.topAnchor.constraint(equalTo: shutterWarningLabel.bottomAnchor, constant: 4),
+            motoBannerLabel.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 8),
+            motoBannerLabel.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -8),
+            motoBannerLabel.heightAnchor.constraint(equalToConstant: 28),
 
             recordButton.bottomAnchor.constraint(equalTo: guide.bottomAnchor, constant: -14),
             recordButton.centerXAnchor.constraint(equalTo: view.centerXAnchor),
@@ -243,6 +296,26 @@ final class CameraViewController: UIViewController {
         antiBlurBtn.setTitleColor(next ? UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0) : UIColor(white: 0.75, alpha: 1.0), for: .normal)
     }
 
+    @objc private func handleToggleMotoMode() {
+        let next = !engine.isMotoModeEnabled
+        engine.setMotoMode(next)
+        motoModeBtn.setTitle(next ? "MOTO: ON" : "MOTO: OFF", for: .normal)
+        motoModeBtn.backgroundColor = next
+            ? UIColor(red: 0.90, green: 0.28, blue: 0.12, alpha: 0.95)
+            : UIColor(white: 0.18, alpha: 0.85)
+        motoBannerLabel.isHidden = !next
+        if next {
+            focusLockBtn.setTitle("Focus: HYP", for: .normal)
+            focusLockBtn.setTitleColor(UIColor(red: 1.0, green: 0.80, blue: 0.25, alpha: 1.0), for: .normal)
+            antiBlurBtn.setTitle("AntiBlur: 1/250", for: .normal)
+            antiBlurBtn.setTitleColor(UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0), for: .normal)
+        } else {
+            focusLockBtn.setTitle("Focus: AUTO", for: .normal)
+            focusLockBtn.setTitleColor(.white, for: .normal)
+            antiBlurBtn.setTitle(engine.isAntiBlurCapEnabled ? "AntiBlur: ON" : "AntiBlur: OFF", for: .normal)
+        }
+    }
+
     @objc private func handleRecordTap() {
         if engine.isRecording {
             recordButton.isEnabled = false
@@ -265,7 +338,8 @@ extension CameraViewController: ProCameraEngineDelegate {
         lensPos: Float,
         gyroCount: UInt64,
         frameCount: UInt32,
-        recordingDurationSec: Double
+        recordingDurationSec: Double,
+        gyroMagRadSec: Double
     ) {
         let ramMB = Double(GFSystemProbe.currentPhysFootprintBytes()) / (1024.0 * 1024.0)
         topHudLabel.text = String(
@@ -278,6 +352,9 @@ extension CameraViewController: ProCameraEngineDelegate {
             let secs = Int(recordingDurationSec) % 60
             recStatusLabel.textColor = UIColor(red: 1.0, green: 0.35, blue: 0.35, alpha: 1.0)
             recStatusLabel.text = String(format: "REC %02d:%02d | F:%u | IMU:%llu", mins, secs, frameCount, gyroCount)
+            shutterWarningLabel.isHidden = !(exposureMs > 16.7 && gyroMagRadSec > 1.5)
+        } else {
+            shutterWarningLabel.isHidden = true
         }
     }
 

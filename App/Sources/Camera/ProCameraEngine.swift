@@ -39,12 +39,14 @@ enum CaptureMode: UInt32 {
 enum BitratePreset: Int {
     case mbps35 = 35_000_000
     case mbps45 = 45_000_000
+    case mbps50 = 50_000_000
     case mbps60 = 60_000_000
 
     var label: String {
         switch self {
         case .mbps35: return "35M"
         case .mbps45: return "45M"
+        case .mbps50: return "50M"
         case .mbps60: return "60M"
         }
     }
@@ -58,7 +60,8 @@ protocol ProCameraEngineDelegate: AnyObject {
         lensPos: Float,
         gyroCount: UInt64,
         frameCount: UInt32,
-        recordingDurationSec: Double
+        recordingDurationSec: Double,
+        gyroMagRadSec: Double
     )
     func cameraEngineDidFinishRecording(take: CaptureTake?, summary: GFSidecarSummaryObjC?, error: Error?)
 }
@@ -91,6 +94,7 @@ final class ProCameraEngine: NSObject {
     private(set) var isFocusLocked = false
     private(set) var isExposureLocked = false
     private(set) var isAntiBlurCapEnabled = true
+    private(set) var isMotoModeEnabled = false
     private(set) var isRecording = false
 
     // Active recording state (guarded by writerQueue)
@@ -126,6 +130,7 @@ final class ProCameraEngine: NSObject {
     private var gyroRingBuffer: [BufferedGyroSample] = []
     private var accelRingBuffer: [BufferedAccelSample] = []
     private var activeSidecarWriter: GFSidecarWriterBridge?
+    private var latestGyroMagRadSec: Double = 0.0
     private var isImuRunning = false
 
     func startSession() {
@@ -212,7 +217,7 @@ final class ProCameraEngine: NSObject {
             do {
                 try dev.lockForConfiguration()
                 if enabled {
-                    let capTimescale: Int32 = (self.currentMode == .cinema1080p30) ? 120 : 240
+                    let capTimescale: Int32 = self.isMotoModeEnabled ? 250 : ((self.currentMode == .cinema1080p30) ? 120 : 240)
                     dev.activeMaxExposureDuration = CMTime(value: 1, timescale: capTimescale)
                 } else {
                     dev.activeMaxExposureDuration = .invalid
@@ -220,6 +225,39 @@ final class ProCameraEngine: NSObject {
                 dev.unlockForConfiguration()
             } catch {
                 FileLogger.shared.log("Anti-blur cap error: \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func setMotoMode(_ enabled: Bool) {
+        sessionQueue.async { [weak self] in
+            guard let self = self, let dev = self.videoDevice else { return }
+            self.isMotoModeEnabled = enabled
+            do {
+                try dev.lockForConfiguration()
+                if enabled {
+                    if dev.isLockingFocusWithCustomLensPositionSupported {
+                        dev.setFocusModeLocked(lensPosition: 0.88, completionHandler: nil)
+                        self.isFocusLocked = true
+                    } else if dev.isFocusModeSupported(.locked) {
+                        dev.focusMode = .locked
+                        self.isFocusLocked = true
+                    }
+                    dev.activeMaxExposureDuration = CMTime(value: 1, timescale: 250)
+                    self.isAntiBlurCapEnabled = true
+                    self.currentBitrate = .mbps50
+                } else {
+                    if dev.isFocusModeSupported(.continuousAutoFocus) {
+                        dev.focusMode = .continuousAutoFocus
+                        self.isFocusLocked = false
+                    }
+                    let capTimescale: Int32 = (self.currentMode == .cinema1080p30) ? 120 : 240
+                    dev.activeMaxExposureDuration = self.isAntiBlurCapEnabled ? CMTime(value: 1, timescale: capTimescale) : .invalid
+                    self.currentBitrate = .mbps45
+                }
+                dev.unlockForConfiguration()
+            } catch {
+                FileLogger.shared.log("Moto Mode error: \(error.localizedDescription)")
             }
         }
     }
@@ -568,6 +606,7 @@ final class ProCameraEngine: NSObject {
 
                 self.imuBufferLock.lock()
                 self.gyroRingBuffer.append(sample)
+                self.latestGyroMagRadSec = sqrt(sample.gx * sample.gx + sample.gy * sample.gy + sample.gz * sample.gz)
                 let cutoff = ts - 0.55
                 while let first = self.gyroRingBuffer.first, first.timestamp < cutoff {
                     self.gyroRingBuffer.removeFirst()
@@ -673,6 +712,9 @@ final class ProCameraEngine: NSObject {
             var dur = 0.0
             var frames: UInt32 = 0
             var gyros: UInt64 = 0
+            self.imuBufferLock.lock()
+            let gMag = self.latestGyroMagRadSec
+            self.imuBufferLock.unlock()
             if self.isRecording {
                 frames = self.recordedFrameIndex
                 gyros = self.recordedGyroCount
@@ -689,7 +731,8 @@ final class ProCameraEngine: NSObject {
                     lensPos: lens,
                     gyroCount: gyros,
                     frameCount: frames,
-                    recordingDurationSec: dur
+                    recordingDurationSec: dur,
+                    gyroMagRadSec: gMag
                 )
             }
         }

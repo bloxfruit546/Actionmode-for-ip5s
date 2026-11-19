@@ -34,15 +34,17 @@ void FrameWarpCalculator::computeInverseHomography(
     double cx,
     double cy,
     double zoom,
-    float outH[9]
+    float outH[9],
+    double cxVirtOffset,
+    double cyVirtOffset
 ) {
     double R[9];
     computeRotationMatrix3x3(qCorr, R);
 
     const double invFxZ = 1.0 / (fx * zoom);
     const double invFyZ = 1.0 / (fy * zoom);
-    const double tx = -cx * invFxZ;
-    const double ty = -cy * invFyZ;
+    const double tx = -(cx + cxVirtOffset) * invFxZ;
+    const double ty = -(cy + cyVirtOffset) * invFyZ;
 
     double B[9];
     B[0] = R[0] * invFxZ;
@@ -78,7 +80,9 @@ double FrameWarpCalculator::computeRequiredZoom(
     double fy,
     double cx,
     double cy,
-    double borderMarginPx
+    double borderMarginPx,
+    double cxVirtOffset,
+    double cyVirtOffset
 ) {
     const double maxU = static_cast<double>(width - 1);
     const double maxV = static_cast<double>(height - 1);
@@ -100,7 +104,7 @@ double FrameWarpCalculator::computeRequiredZoom(
 
     auto fitsInside = [&](double z) -> bool {
         float H[9];
-        computeInverseHomography(qCorr, fx, fy, cx, cy, z, H);
+        computeInverseHomography(qCorr, fx, fy, cx, cy, z, H, cxVirtOffset, cyVirtOffset);
         for (const auto& pt : boundaryPts) {
             const double u = pt.first;
             const double v = pt.second;
@@ -174,13 +178,26 @@ WarpComputationResult FrameWarpCalculator::computeAllFramesWithRollingShutter(
     double nominalFps,
     double maxZoomLimit,
     bool rollingShutterCorrection,
-    bool dynamicZoomEnabled
+    bool dynamicZoomEnabled,
+    const std::vector<double>* residualShiftX,
+    const std::vector<double>* residualShiftY,
+    EdgeFillMode edgeFillMode,
+    double fovScaleBoost
 ) {
     WarpComputationResult res;
     const size_t n = std::min(traj.rawFrameQuats.size(), traj.smoothFrameQuats.size());
     if (n == 0) {
         return res;
     }
+
+    const bool hasResidual = (residualShiftX != nullptr && residualShiftY != nullptr &&
+                              residualShiftX->size() == n && residualShiftY->size() == n);
+    auto getShift = [&](size_t idx) -> std::pair<double, double> {
+        if (!hasResidual) {
+            return {0.0, 0.0};
+        }
+        return {(*residualShiftX)[idx], (*residualShiftY)[idx]};
+    };
 
     const double dt = (nominalFps > 1.0) ? (1.0 / nominalFps) : (1.0 / 30.0);
 
@@ -238,18 +255,19 @@ WarpComputationResult FrameWarpCalculator::computeAllFramesWithRollingShutter(
     // Step 2: Compute minimum safe zoom per frame across slice 0, mid, and 31
     std::vector<double> zMin(n, 1.0);
     for (size_t i = 0; i < n; ++i) {
+        const auto shift = getShift(i);
         const Quat qCorrMid = (traj.rawFrameQuats[i].conjugate() * adjustedSmooth[i]).normalized();
         double zReq = computeRequiredZoom(
             qCorrMid, profile.width, profile.height,
-            profile.fx, profile.fy, profile.cx, profile.cy, 4.0
+            profile.fx, profile.fy, profile.cx, profile.cy, 4.0, shift.first, shift.second
         );
         if (useRS) {
             const Quat qTop = engine.sampleRawQuaternionAt(traj.frameTimestampsSec[i] - 0.5 * profile.readoutTimeSec);
             const Quat qBot = engine.sampleRawQuaternionAt(traj.frameTimestampsSec[i] + 0.5 * profile.readoutTimeSec);
             const Quat qCorrTop = (qTop.conjugate() * adjustedSmooth[i]).normalized();
             const Quat qCorrBot = (qBot.conjugate() * adjustedSmooth[i]).normalized();
-            zReq = std::max(zReq, computeRequiredZoom(qCorrTop, profile.width, profile.height, profile.fx, profile.fy, profile.cx, profile.cy, 4.0));
-            zReq = std::max(zReq, computeRequiredZoom(qCorrBot, profile.width, profile.height, profile.fx, profile.fy, profile.cx, profile.cy, 4.0));
+            zReq = std::max(zReq, computeRequiredZoom(qCorrTop, profile.width, profile.height, profile.fx, profile.fy, profile.cx, profile.cy, 4.0, shift.first, shift.second));
+            zReq = std::max(zReq, computeRequiredZoom(qCorrBot, profile.width, profile.height, profile.fx, profile.fy, profile.cx, profile.cy, 4.0, shift.first, shift.second));
         }
         zMin[i] = zReq;
     }
@@ -298,16 +316,24 @@ WarpComputationResult FrameWarpCalculator::computeAllFramesWithRollingShutter(
     res.maxZoom = 0.0;
     double sumZoom = 0.0;
 
+    const double boost = (edgeFillMode != EdgeFillMode::StandardCrop)
+        ? std::min(1.0, std::max(0.0, fovScaleBoost))
+        : 0.0;
+
     for (size_t i = 0; i < n; ++i) {
+        const auto shift = getShift(i);
         double zFinal = zSmooth[i];
         if (maxZoomLimit > 1.0) {
             zFinal = std::min(zFinal, maxZoomLimit);
+        }
+        if (boost > 0.0) {
+            zFinal = 1.0 + (1.0 - boost) * (zFinal - 1.0);
         }
 
         const Quat qCorrMid = (traj.rawFrameQuats[i].conjugate() * adjustedSmooth[i]).normalized();
         GFWarpMatrixPacket pkt{};
         computeInverseHomography(
-            qCorrMid, profile.fx, profile.fy, profile.cx, profile.cy, zFinal, pkt.m
+            qCorrMid, profile.fx, profile.fy, profile.cx, profile.cy, zFinal, pkt.m, shift.first, shift.second
         );
         pkt.zoomUsed = static_cast<float>(zFinal);
         res.packets[i] = pkt;
@@ -321,7 +347,7 @@ WarpComputationResult FrameWarpCalculator::computeAllFramesWithRollingShutter(
                 const Quat qRawRow = engine.sampleRawQuaternionAt(tRow);
                 const Quat qCorrRow = (qRawRow.conjugate() * adjustedSmooth[i]).normalized();
                 computeInverseHomography(
-                    qCorrRow, profile.fx, profile.fy, profile.cx, profile.cy, zFinal, lut.sliceH[s]
+                    qCorrRow, profile.fx, profile.fy, profile.cx, profile.cy, zFinal, lut.sliceH[s], shift.first, shift.second
                 );
             } else {
                 std::copy(std::begin(pkt.m), std::end(pkt.m), std::begin(lut.sliceH[s]));
@@ -334,6 +360,7 @@ WarpComputationResult FrameWarpCalculator::computeAllFramesWithRollingShutter(
         sumZoom += zFinal;
     }
 
+    res.adjustedSmoothQuats = std::move(adjustedSmooth);
     res.avgZoom = sumZoom / static_cast<double>(n);
     return res;
 }

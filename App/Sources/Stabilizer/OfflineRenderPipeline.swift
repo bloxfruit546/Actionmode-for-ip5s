@@ -19,6 +19,83 @@ struct StabilizeExportConfig: Codable {
     let hasReadoutOverride: Bool
     let signedReadoutTimeMs: Double
     let focalScaleOverride: Double
+    let hybridResidualEnabled: Bool
+    let motoActionMode: Bool
+    let edgeFillMode: Int
+    let fovScaleBoost: Double
+    let sharpenStrength: Double
+    let exportBitrateMbps: Int
+
+    init(
+        pitchSmoothness: Double,
+        yawSmoothness: Double,
+        rollSmoothness: Double,
+        velocityDamping: Double,
+        timeOffsetMs: Double,
+        maxZoomLimit: Double,
+        horizonLockEnabled: Bool,
+        horizonLockAmount: Double,
+        horizonTiltOffsetDeg: Double,
+        rollingShutterCorrection: Bool,
+        dynamicZoomEnabled: Bool,
+        axisPresetIndex: Int,
+        hasReadoutOverride: Bool,
+        signedReadoutTimeMs: Double,
+        focalScaleOverride: Double,
+        hybridResidualEnabled: Bool = true,
+        motoActionMode: Bool = false,
+        edgeFillMode: Int = 0,
+        fovScaleBoost: Double = 1.0,
+        sharpenStrength: Double = 0.45,
+        exportBitrateMbps: Int = 45
+    ) {
+        self.pitchSmoothness = pitchSmoothness
+        self.yawSmoothness = yawSmoothness
+        self.rollSmoothness = rollSmoothness
+        self.velocityDamping = velocityDamping
+        self.timeOffsetMs = timeOffsetMs
+        self.maxZoomLimit = maxZoomLimit
+        self.horizonLockEnabled = horizonLockEnabled
+        self.horizonLockAmount = horizonLockAmount
+        self.horizonTiltOffsetDeg = horizonTiltOffsetDeg
+        self.rollingShutterCorrection = rollingShutterCorrection
+        self.dynamicZoomEnabled = dynamicZoomEnabled
+        self.axisPresetIndex = axisPresetIndex
+        self.hasReadoutOverride = hasReadoutOverride
+        self.signedReadoutTimeMs = signedReadoutTimeMs
+        self.focalScaleOverride = focalScaleOverride
+        self.hybridResidualEnabled = hybridResidualEnabled
+        self.motoActionMode = motoActionMode
+        self.edgeFillMode = edgeFillMode
+        self.fovScaleBoost = fovScaleBoost
+        self.sharpenStrength = sharpenStrength
+        self.exportBitrateMbps = exportBitrateMbps
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        pitchSmoothness = try c.decode(Double.self, forKey: .pitchSmoothness)
+        yawSmoothness = try c.decode(Double.self, forKey: .yawSmoothness)
+        rollSmoothness = try c.decode(Double.self, forKey: .rollSmoothness)
+        velocityDamping = try c.decode(Double.self, forKey: .velocityDamping)
+        timeOffsetMs = try c.decode(Double.self, forKey: .timeOffsetMs)
+        maxZoomLimit = try c.decode(Double.self, forKey: .maxZoomLimit)
+        horizonLockEnabled = try c.decode(Bool.self, forKey: .horizonLockEnabled)
+        horizonLockAmount = try c.decode(Double.self, forKey: .horizonLockAmount)
+        horizonTiltOffsetDeg = try c.decode(Double.self, forKey: .horizonTiltOffsetDeg)
+        rollingShutterCorrection = try c.decode(Bool.self, forKey: .rollingShutterCorrection)
+        dynamicZoomEnabled = try c.decode(Bool.self, forKey: .dynamicZoomEnabled)
+        axisPresetIndex = try c.decode(Int.self, forKey: .axisPresetIndex)
+        hasReadoutOverride = try c.decode(Bool.self, forKey: .hasReadoutOverride)
+        signedReadoutTimeMs = try c.decode(Double.self, forKey: .signedReadoutTimeMs)
+        focalScaleOverride = try c.decode(Double.self, forKey: .focalScaleOverride)
+        hybridResidualEnabled = (try? c.decodeIfPresent(Bool.self, forKey: .hybridResidualEnabled)) ?? true
+        motoActionMode = (try? c.decodeIfPresent(Bool.self, forKey: .motoActionMode)) ?? false
+        edgeFillMode = (try? c.decodeIfPresent(Int.self, forKey: .edgeFillMode)) ?? 0
+        fovScaleBoost = (try? c.decodeIfPresent(Double.self, forKey: .fovScaleBoost)) ?? 1.0
+        sharpenStrength = (try? c.decodeIfPresent(Double.self, forKey: .sharpenStrength)) ?? 0.45
+        exportBitrateMbps = (try? c.decodeIfPresent(Int.self, forKey: .exportBitrateMbps)) ?? 45
+    }
 }
 
 struct StabilizeExportResult {
@@ -62,6 +139,7 @@ final class OfflineRenderPipeline {
 
     func runAutoSync(
         take: CaptureTake,
+        motoActionMode: Bool = false,
         completion: @escaping (Result<GFOpticalSyncResultObjC, Error>) -> Void
     ) {
         setupQueue.async { [weak self] in
@@ -114,7 +192,7 @@ final class OfflineRenderPipeline {
                 }
                 reader.cancelReading()
 
-                let result = collector.solve(withSidecarPath: take.sidecarURL.path)
+                let result = collector.solve(withSidecarPath: take.sidecarURL.path, motoActionMode: motoActionMode)
                 let elapsed = CFAbsoluteTimeGetCurrent() - startTime
                 FileLogger.shared.log(String(format: "Auto-Sync completed in %.2fs (%d frames): %@", elapsed, count, result.diagnosticMessage))
 
@@ -177,6 +255,10 @@ final class OfflineRenderPipeline {
                 return
             }
 
+            if config.hybridResidualEnabled && !config.motoActionMode {
+                self.runHybridResidualPass(asset: asset, videoTrack: videoTrack, bridge: bridge)
+            }
+
             let outURL = Self.stabilizedDirectory.appendingPathComponent("\(take.uuid)_stab.mov")
             try? FileManager.default.removeItem(at: outURL)
 
@@ -209,11 +291,19 @@ final class OfflineRenderPipeline {
 
                 let writer = try AVAssetWriter(outputURL: outURL, fileType: .mov)
                 writer.shouldOptimizeForNetworkUse = false
+                if !asset.metadata.isEmpty {
+                    writer.metadata = asset.metadata
+                } else if !asset.commonMetadata.isEmpty {
+                    writer.metadata = asset.commonMetadata
+                }
 
-                let bitrate = (height >= 1000) ? 45_000_000 : 35_000_000
+                let targetMbps = max(20, min(60, config.exportBitrateMbps > 0 ? config.exportBitrateMbps : ((height >= 1000) ? 45 : 35)))
+                let bitrate = targetMbps * 1_000_000
                 let compressionProps: [String: Any] = [
                     AVVideoAverageBitRateKey: bitrate,
                     AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+                    AVVideoH264EntropyModeKey: AVVideoH264EntropyModeCABAC,
+                    AVVideoAllowFrameReorderingKey: true,
                     AVVideoExpectedSourceFrameRateKey: Int(plan.nominalFps > 1 ? plan.nominalFps : 30)
                 ]
                 let videoWriterSettings: [String: Any] = [
@@ -532,6 +622,38 @@ final class OfflineRenderPipeline {
         }
     }
 
+    private func runHybridResidualPass(asset: AVURLAsset, videoTrack: AVAssetTrack, bridge: GFStabilizerBridge) {
+        guard let preReader = try? AVAssetReader(asset: asset) else { return }
+        let settings: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        ]
+        let out = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: settings)
+        out.alwaysCopiesSampleData = false
+        guard preReader.canAdd(out) else { return }
+        preReader.add(out)
+        guard preReader.startReading() else { return }
+
+        while !isCancelled {
+            var done = false
+            autoreleasepool {
+                guard let sample = out.copyNextSampleBuffer() else {
+                    done = true
+                    return
+                }
+                if let pb = CMSampleBufferGetImageBuffer(sample) {
+                    let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+                    bridge.pushHybridResidualPixelBuffer(pb, timestampSec: pts)
+                }
+            }
+            if done { break }
+        }
+        preReader.cancelReading()
+        if !isCancelled {
+            bridge.finalizeHybridResidual()
+            FileLogger.shared.log(String(format: "HybridResidual: MaxShift=%.1f px | SafeZoom=[%.2fx..%.2fx]", bridge.plan.hybridResidualMaxPx, bridge.plan.minZoom, bridge.plan.maxZoom))
+        }
+    }
+
     private func makeBridge(sidecarPath: String, config: StabilizeExportConfig, videoRotationDegrees: Int) -> GFStabilizerBridge? {
         return GFStabilizerBridge(
             sidecarPath: sidecarPath,
@@ -550,7 +672,11 @@ final class OfflineRenderPipeline {
             videoRotationDegrees: videoRotationDegrees,
             hasReadoutOverride: config.hasReadoutOverride,
             signedReadoutTimeMs: config.signedReadoutTimeMs,
-            focalScaleOverride: config.focalScaleOverride
+            focalScaleOverride: config.focalScaleOverride,
+            motoActionMode: config.motoActionMode,
+            edgeFillMode: config.edgeFillMode,
+            fovScaleBoost: config.fovScaleBoost,
+            sharpenStrength: config.sharpenStrength
         )
     }
 

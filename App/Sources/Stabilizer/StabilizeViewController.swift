@@ -24,13 +24,46 @@ final class StabilizeViewController: UIViewController {
         return v
     }()
 
+    private let motoPresetButton: UIButton = {
+        let btn = UIButton(type: .system)
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        btn.setTitle("MOTO POV (ACTION)", for: .normal)
+        btn.setTitleColor(.white, for: .normal)
+        btn.titleLabel?.font = UIFont.systemFont(ofSize: 13, weight: .heavy)
+        btn.backgroundColor = UIColor(red: 0.90, green: 0.28, blue: 0.12, alpha: 1.0)
+        btn.layer.cornerRadius = 8
+        return btn
+    }()
+
+    private let naturalPresetButton: UIButton = {
+        let btn = UIButton(type: .system)
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        btn.setTitle("Natural", for: .normal)
+        btn.setTitleColor(.white, for: .normal)
+        btn.titleLabel?.font = UIFont.systemFont(ofSize: 12, weight: .bold)
+        btn.backgroundColor = UIColor(red: 0.22, green: 0.45, blue: 0.72, alpha: 1.0)
+        btn.layer.cornerRadius = 8
+        return btn
+    }()
+
     private let ultraGimbalButton: UIButton = {
         let btn = UIButton(type: .system)
         btn.translatesAutoresizingMaskIntoConstraints = false
-        btn.setTitle("ULTRA GIMBAL (MAX SMOOTH)", for: .normal)
+        btn.setTitle("Ultra Gimbal", for: .normal)
         btn.setTitleColor(.white, for: .normal)
-        btn.titleLabel?.font = UIFont.systemFont(ofSize: 13, weight: .heavy)
+        btn.titleLabel?.font = UIFont.systemFont(ofSize: 12, weight: .bold)
         btn.backgroundColor = UIColor(red: 0.08, green: 0.62, blue: 0.58, alpha: 1.0)
+        btn.layer.cornerRadius = 8
+        return btn
+    }()
+
+    private let steadicamPresetButton: UIButton = {
+        let btn = UIButton(type: .system)
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        btn.setTitle("Steadicam Lock", for: .normal)
+        btn.setTitleColor(.white, for: .normal)
+        btn.titleLabel?.font = UIFont.systemFont(ofSize: 12, weight: .heavy)
+        btn.backgroundColor = UIColor(red: 0.85, green: 0.35, blue: 0.15, alpha: 1.0)
         btn.layer.cornerRadius = 8
         return btn
     }()
@@ -79,6 +112,39 @@ final class StabilizeViewController: UIViewController {
 
     private let rsLabel = UILabel()
     private let rsSwitch = UISwitch()
+
+    private let hybridResidualLabel = UILabel()
+    private let hybridResidualSwitch = UISwitch()
+
+    private let motoActionLabel = UILabel()
+    private let motoActionSwitch = UISwitch()
+
+    private let finishingHeaderLabel: UILabel = {
+        let l = UILabel()
+        l.translatesAutoresizingMaskIntoConstraints = false
+        l.font = UIFont(name: "Menlo-Bold", size: 11) ?? UIFont.systemFont(ofSize: 11, weight: .heavy)
+        l.textColor = UIColor(red: 0.35, green: 0.85, blue: 1.0, alpha: 1.0)
+        l.text = "FINISHING & FULL-FRAME POLISH"
+        return l
+    }()
+    private let framingLabel = UILabel()
+    private let framingControl: UISegmentedControl = {
+        let sc = UISegmentedControl(items: ["Dynamic Crop", "Full-Frame Fill", "Mirror Edge"])
+        sc.translatesAutoresizingMaskIntoConstraints = false
+        sc.selectedSegmentIndex = 0
+        sc.tintColor = UIColor(red: 0.25, green: 0.72, blue: 0.95, alpha: 1.0)
+        return sc
+    }()
+    private let sharpenLabel = UILabel()
+    private let sharpenSlider = UISlider()
+    private let exportBitrateLabel = UILabel()
+    private let exportBitrateControl: UISegmentedControl = {
+        let sc = UISegmentedControl(items: ["35M", "45M", "60M"])
+        sc.translatesAutoresizingMaskIntoConstraints = false
+        sc.selectedSegmentIndex = 1
+        sc.tintColor = UIColor(red: 0.95, green: 0.65, blue: 0.20, alpha: 1.0)
+        return sc
+    }()
 
     private let offsetLabel = UILabel()
     private let offsetSlider = UISlider()
@@ -216,7 +282,7 @@ final class StabilizeViewController: UIViewController {
     }
 
     private func configureControls() {
-        for lbl in [pitchLabel, yawLabel, rollLabel, zoomLabel, dynamicZoomLabel, horizonLabel, tiltLabel, rsLabel, offsetLabel] {
+        for lbl in [pitchLabel, yawLabel, rollLabel, zoomLabel, dynamicZoomLabel, horizonLabel, tiltLabel, rsLabel, hybridResidualLabel, motoActionLabel, framingLabel, sharpenLabel, exportBitrateLabel, offsetLabel] {
             lbl.translatesAutoresizingMaskIntoConstraints = false
             lbl.font = UIFont(name: "Menlo-Bold", size: 11) ?? UIFont.systemFont(ofSize: 11, weight: .bold)
             lbl.textColor = .white
@@ -227,7 +293,11 @@ final class StabilizeViewController: UIViewController {
         configureSlider(rollSlider, min: 0.0, max: 1.0, val: 0.75)
         configureSlider(zoomSlider, min: 1.05, max: 2.40, val: 1.95)
         configureSlider(tiltSlider, min: -15.0, max: 15.0, val: 0.0)
+        configureSlider(sharpenSlider, min: 0.0, max: 1.0, val: 0.45)
         configureSlider(offsetSlider, min: -80.0, max: 80.0, val: 0.0)
+
+        framingControl.addTarget(self, action: #selector(handleFramingChanged), for: .valueChanged)
+        exportBitrateControl.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
 
         unlimitedZoomSwitch.translatesAutoresizingMaskIntoConstraints = false
         unlimitedZoomSwitch.isOn = true
@@ -245,7 +315,18 @@ final class StabilizeViewController: UIViewController {
         rsSwitch.isOn = true
         rsSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
 
+        hybridResidualSwitch.translatesAutoresizingMaskIntoConstraints = false
+        hybridResidualSwitch.isOn = true
+        hybridResidualSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
+
+        motoActionSwitch.translatesAutoresizingMaskIntoConstraints = false
+        motoActionSwitch.isOn = false
+        motoActionSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
+
+        motoPresetButton.addTarget(self, action: #selector(handleMotoPovPreset), for: .touchUpInside)
+        naturalPresetButton.addTarget(self, action: #selector(handleNaturalPreset), for: .touchUpInside)
         ultraGimbalButton.addTarget(self, action: #selector(handleUltraGimbalPreset), for: .touchUpInside)
+        steadicamPresetButton.addTarget(self, action: #selector(handleSteadicamPreset), for: .touchUpInside)
         autoSyncButton.addTarget(self, action: #selector(handleAutoSync), for: .touchUpInside)
         previewButton.addTarget(self, action: #selector(handlePreview), for: .touchUpInside)
         renderButton.addTarget(self, action: #selector(handleRenderTap), for: .touchUpInside)
@@ -276,13 +357,22 @@ final class StabilizeViewController: UIViewController {
         view.addSubview(scrollView)
         scrollView.addSubview(contentView)
 
+        let presetRow = UIStackView(arrangedSubviews: [naturalPresetButton, ultraGimbalButton, steadicamPresetButton])
+        presetRow.translatesAutoresizingMaskIntoConstraints = false
+        presetRow.axis = .horizontal
+        presetRow.spacing = 6
+        presetRow.distribution = .fillEqually
+
         let zoomRow = makeSwitchRow(zoomLabel, unlimitedZoomSwitch)
         let dynZoomRow = makeSwitchRow(dynamicZoomLabel, dynamicZoomSwitch)
         let horizonRow = makeSwitchRow(horizonLabel, horizonSwitch)
         let rsRow = makeSwitchRow(rsLabel, rsSwitch)
+        let hybridRow = makeSwitchRow(hybridResidualLabel, hybridResidualSwitch)
+        let motoRow = makeSwitchRow(motoActionLabel, motoActionSwitch)
 
         let stack = UIStackView(arrangedSubviews: [
-            ultraGimbalButton,
+            motoPresetButton,
+            presetRow,
             autoSyncButton,
             autoSyncLabel,
             pitchLabel,
@@ -298,6 +388,15 @@ final class StabilizeViewController: UIViewController {
             tiltLabel,
             tiltSlider,
             rsRow,
+            hybridRow,
+            motoRow,
+            finishingHeaderLabel,
+            framingLabel,
+            framingControl,
+            sharpenLabel,
+            sharpenSlider,
+            exportBitrateLabel,
+            exportBitrateControl,
             offsetLabel,
             offsetSlider,
             previewButton,
@@ -334,7 +433,10 @@ final class StabilizeViewController: UIViewController {
             stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
             stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -28),
 
+            motoPresetButton.heightAnchor.constraint(equalToConstant: 42),
+            naturalPresetButton.heightAnchor.constraint(equalToConstant: 40),
             ultraGimbalButton.heightAnchor.constraint(equalToConstant: 40),
+            steadicamPresetButton.heightAnchor.constraint(equalToConstant: 40),
             autoSyncButton.heightAnchor.constraint(equalToConstant: 40),
             previewButton.heightAnchor.constraint(equalToConstant: 38),
             renderButton.heightAnchor.constraint(equalToConstant: 46),
@@ -347,6 +449,14 @@ final class StabilizeViewController: UIViewController {
 
     private func currentConfig() -> StabilizeExportConfig {
         let maxZoom: Double = unlimitedZoomSwitch.isOn ? 0.0 : Double(zoomSlider.value)
+        let edgeFillMode = framingControl.selectedSegmentIndex
+        let fovBoost = (edgeFillMode == 0) ? 0.0 : 1.0
+        let bitrateMbps: Int
+        switch exportBitrateControl.selectedSegmentIndex {
+        case 0: bitrateMbps = 35
+        case 2: bitrateMbps = 60
+        default: bitrateMbps = 45
+        }
         return StabilizeExportConfig(
             pitchSmoothness: Double(pitchSlider.value),
             yawSmoothness: Double(yawSlider.value),
@@ -362,7 +472,13 @@ final class StabilizeViewController: UIViewController {
             axisPresetIndex: detectedAxisPresetIndex,
             hasReadoutOverride: hasReadoutOverride,
             signedReadoutTimeMs: detectedSignedReadoutMs,
-            focalScaleOverride: detectedFocalScale
+            focalScaleOverride: detectedFocalScale,
+            hybridResidualEnabled: hybridResidualSwitch.isOn,
+            motoActionMode: motoActionSwitch.isOn,
+            edgeFillMode: edgeFillMode,
+            fovScaleBoost: fovBoost,
+            sharpenStrength: Double(sharpenSlider.value),
+            exportBitrateMbps: bitrateMbps
         )
     }
 
@@ -377,13 +493,60 @@ final class StabilizeViewController: UIViewController {
         present(alert, animated: true)
     }
 
+    @objc private func handleMotoPovPreset() {
+        motoActionSwitch.isOn = true
+        pitchSlider.value = 0.94
+        yawSlider.value = 0.72
+        rollSlider.value = 0.98
+        horizonSwitch.isOn = true
+        hybridResidualSwitch.isOn = false
+        unlimitedZoomSwitch.isOn = false
+        zoomSlider.value = 1.65
+        rsSwitch.isOn = true
+        dynamicZoomSwitch.isOn = true
+        updateSliderLabels()
+        handlePreview()
+    }
+
+    @objc private func handleNaturalPreset() {
+        motoActionSwitch.isOn = false
+        pitchSlider.value = 0.55
+        yawSlider.value = 0.55
+        rollSlider.value = 0.65
+        horizonSwitch.isOn = false
+        hybridResidualSwitch.isOn = true
+        unlimitedZoomSwitch.isOn = false
+        zoomSlider.value = 1.15
+        rsSwitch.isOn = true
+        dynamicZoomSwitch.isOn = true
+        updateSliderLabels()
+        handlePreview()
+    }
+
     @objc private func handleUltraGimbalPreset() {
+        motoActionSwitch.isOn = false
         pitchSlider.value = 0.85
         yawSlider.value = 0.85
         rollSlider.value = 0.92
         horizonSwitch.isOn = true
+        hybridResidualSwitch.isOn = true
         unlimitedZoomSwitch.isOn = true
         zoomSlider.value = 2.00
+        rsSwitch.isOn = true
+        dynamicZoomSwitch.isOn = true
+        updateSliderLabels()
+        handlePreview()
+    }
+
+    @objc private func handleSteadicamPreset() {
+        motoActionSwitch.isOn = false
+        pitchSlider.value = 0.96
+        yawSlider.value = 0.96
+        rollSlider.value = 0.98
+        horizonSwitch.isOn = true
+        hybridResidualSwitch.isOn = true
+        unlimitedZoomSwitch.isOn = false
+        zoomSlider.value = 2.20
         rsSwitch.isOn = true
         dynamicZoomSwitch.isOn = true
         updateSliderLabels()
@@ -411,8 +574,22 @@ final class StabilizeViewController: UIViewController {
         tiltSlider.isEnabled = horizonSwitch.isOn
         tiltSlider.alpha = horizonSwitch.isOn ? 1.0 : 0.4
 
-        rsLabel.text = rsSwitch.isOn ? "Rolling Shutter Fix: ON" : "Rolling Shutter Fix: OFF"
+        rsLabel.text = rsSwitch.isOn ? "Rolling Shutter Fix (64-Slice): ON" : "Rolling Shutter Fix: OFF"
+        hybridResidualLabel.text = hybridResidualSwitch.isOn ? "Hybrid Optical Residual Lock: ON" : "Hybrid Optical Residual Lock: OFF"
+        motoActionLabel.text = motoActionSwitch.isOn ? "MotoPOV Action Mode (42Hz/Far-ROI): ON" : "MotoPOV Action Mode: OFF"
+        let framingNames = ["Dynamic Safe Crop", "Temporal Full-Frame (1.00x)", "Mirror Border (1.00x)"]
+        let fIdx = max(0, min(2, framingControl.selectedSegmentIndex))
+        framingLabel.text = "Framing: \(framingNames[fIdx])"
+        sharpenLabel.text = String(format: "Adaptive Sharpening (CAS): %.0f%%", sharpenSlider.value * 100.0)
+        let tierNames = ["Standard High (35M CABAC)", "Cinema Pro (45M CABAC)", "Master Archive (60M CABAC)"]
+        let bIdx = max(0, min(2, exportBitrateControl.selectedSegmentIndex))
+        exportBitrateLabel.text = "Export Bitrate: \(tierNames[bIdx])"
         offsetLabel.text = String(format: "IMU Sync Offset: %+.1f ms", offsetSlider.value)
+    }
+
+    @objc private func handleFramingChanged() {
+        updateSliderLabels()
+        handlePreview()
     }
 
     @objc private func handleHorizonToggled() {
@@ -435,7 +612,7 @@ final class StabilizeViewController: UIViewController {
         autoSyncLabel.textColor = UIColor(white: 0.9, alpha: 1.0)
         autoSyncLabel.text = "Running Optical Flow Auto-Sync & Axis Verification..."
 
-        pipeline.runAutoSync(take: take) { [weak self] result in
+        pipeline.runAutoSync(take: take, motoActionMode: motoActionSwitch.isOn) { [weak self] result in
             guard let self = self else { return }
             self.autoSyncButton.isEnabled = true
             self.autoSyncButton.alpha = 1.0

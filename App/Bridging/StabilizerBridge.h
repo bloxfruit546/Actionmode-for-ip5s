@@ -19,7 +19,7 @@ NS_ASSUME_NONNULL_BEGIN
 @interface GFOpticalSyncCollectorBridge : NSObject
 - (void)reset;
 - (void)addLumaPixelBuffer:(CVPixelBufferRef)pixelBuffer timestampSec:(double)ts;
-- (GFOpticalSyncResultObjC *)solveWithSidecarPath:(NSString *)sidecarPath;
+- (GFOpticalSyncResultObjC *)solveWithSidecarPath:(NSString *)sidecarPath motoActionMode:(BOOL)motoActionMode;
 @end
 
 @interface GFStabilizerPlanObjC : NSObject
@@ -32,6 +32,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, assign) double maxInputRollDeg;
 @property (nonatomic, assign) double maxOutputRollErrorDeg;
 @property (nonatomic, assign) double maxCorrectionDeg;
+@property (nonatomic, assign) double hybridResidualMaxPx;
 @property (nonatomic, copy) NSString *detectedOrientationName;
 @property (nonatomic, copy) NSString *gpuMatrixProof;
 @property (nonatomic, assign) BOOL isIdentityMatrix;
@@ -61,7 +62,14 @@ NS_ASSUME_NONNULL_BEGIN
                         videoRotationDegrees:(NSInteger)videoRotationDegrees
                        hasReadoutOverride:(BOOL)hasReadoutOverride
                       signedReadoutTimeMs:(double)signedReadoutTimeMs
-                       focalScaleOverride:(double)focalScaleOverride;
+                       focalScaleOverride:(double)focalScaleOverride
+                           motoActionMode:(BOOL)motoActionMode
+                             edgeFillMode:(NSInteger)edgeFillMode
+                            fovScaleBoost:(double)fovScaleBoost
+                          sharpenStrength:(double)sharpenStrength;
+
+- (void)pushHybridResidualPixelBuffer:(CVPixelBufferRef)pixelBuffer timestampSec:(double)ts;
+- (void)finalizeHybridResidual;
 
 - (BOOL)warpPixelBuffer:(CVPixelBufferRef)srcPixelBuffer
         intoPixelBuffer:(CVPixelBufferRef)dstPixelBuffer

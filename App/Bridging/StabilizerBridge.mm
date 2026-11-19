@@ -18,13 +18,21 @@ struct GFMtlRowSlice {
 };
 
 struct GFWarpFrameUniformsMetal {
-    GFMtlRowSlice slices[32];
+    GFMtlRowSlice slices[64];
+    GFMtlRowSlice histH[3];
+    simd_float4 histGains;
+    simd_float4 polishParams;
     simd_uint2 outSize;
     simd_uint2 inSize;
     simd_uint2 lumaOutSize;
     simd_uint2 lumaInSize;
     simd_float4 intrinsics;
     simd_float4 distortion;
+};
+
+struct GFHistSlot {
+    CVPixelBufferRef pb = nullptr;
+    NSUInteger frameIndex = 0;
 };
 
 } // namespace
@@ -80,7 +88,7 @@ struct GFWarpFrameUniformsMetal {
     CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
 }
 
-- (GFOpticalSyncResultObjC *)solveWithSidecarPath:(NSString *)sidecarPath {
+- (GFOpticalSyncResultObjC *)solveWithSidecarPath:(NSString *)sidecarPath motoActionMode:(BOOL)motoActionMode {
     GFOpticalSyncResultObjC *out = [[GFOpticalSyncResultObjC alloc] init];
 
     gf::GFFileHeader hdr{};
@@ -108,7 +116,7 @@ struct GFWarpFrameUniformsMetal {
         }
     }
 
-    const gf::OpticalSyncResult res = gf::OpticalSync::solveSyncAndAxes(_frames, hdr, gyro);
+    const gf::OpticalSyncResult res = gf::OpticalSync::solveSyncAndAxes(_frames, hdr, gyro, motoActionMode ? true : false);
     out.valid = res.valid ? YES : NO;
     out.bestOffsetMs = res.bestOffsetMs;
     out.bestNCC = res.bestNCC;
@@ -143,7 +151,20 @@ struct GFWarpFrameUniformsMetal {
     id<MTLComputePipelineState> _chromaPSO;
     CVMetalTextureCacheRef _textureCache;
     std::vector<gf::GFWarpFrameLUT> _frameLUTs;
+    std::vector<gf::Quat> _adjustedSmoothQuats;
+    std::vector<gf::GFFrameRecord> _sidecarFrames;
+    std::vector<double> _residualShiftX;
+    std::vector<double> _residualShiftY;
     gf::CalibrationProfile _profile;
+    gf::TrajectoryEngine _engine;
+    gf::TrajectoryResult _traj;
+    gf::StabilizerConfig _cfg;
+    gf::HybridResidualTracker _hybridTracker;
+    double _fps;
+    gf::EdgeFillMode _edgeFillMode;
+    double _fovScaleBoost;
+    double _sharpenStrength;
+    GFHistSlot _histSlots[3];
     GFStabilizerPlanObjC *_plan;
 }
 
@@ -151,7 +172,18 @@ struct GFWarpFrameUniformsMetal {
     return _plan;
 }
 
+- (void)releaseHistoryBuffers {
+    for (int i = 0; i < 3; ++i) {
+        if (_histSlots[i].pb) {
+            CFRelease(_histSlots[i].pb);
+            _histSlots[i].pb = nullptr;
+        }
+        _histSlots[i].frameIndex = 0;
+    }
+}
+
 - (void)dealloc {
+    [self releaseHistoryBuffers];
     if (_textureCache) {
         CFRelease(_textureCache);
         _textureCache = nullptr;
@@ -174,7 +206,11 @@ struct GFWarpFrameUniformsMetal {
                         videoRotationDegrees:(NSInteger)videoRotationDegrees
                        hasReadoutOverride:(BOOL)hasReadoutOverride
                       signedReadoutTimeMs:(double)signedReadoutTimeMs
-                       focalScaleOverride:(double)focalScaleOverride {
+                       focalScaleOverride:(double)focalScaleOverride
+                           motoActionMode:(BOOL)motoActionMode
+                             edgeFillMode:(NSInteger)edgeFillMode
+                            fovScaleBoost:(double)fovScaleBoost
+                          sharpenStrength:(double)sharpenStrength {
     self = [super init];
     if (!self) {
         return nil;
@@ -201,25 +237,25 @@ struct GFWarpFrameUniformsMetal {
         customAxis = presets[static_cast<size_t>(axisPresetIndex)].m;
     }
 
-    gf::TrajectoryEngine engine;
-    engine.setImuData(hdr, gyro, accel, customAxis);
+    _engine.setImuData(hdr, gyro, accel, customAxis, motoActionMode ? true : false);
 
-    gf::StabilizerConfig cfg;
-    cfg.pitchSmoothness = pitchSmoothness;
-    cfg.yawSmoothness = yawSmoothness;
-    cfg.rollSmoothness = rollSmoothness;
-    cfg.velocityDamping = damping;
-    cfg.timeOffsetMs = offsetMs;
-    cfg.maxZoomLimit = maxZoomLimit;
-    cfg.horizonLockEnabled = horizonLockEnabled ? true : false;
-    cfg.horizonLockAmount = horizonLockAmount;
-    cfg.horizonTiltOffsetDeg = horizonTiltOffsetDeg;
-    cfg.rollingShutterCorrection = rollingShutterCorrection ? true : false;
-    cfg.dynamicZoomEnabled = dynamicZoomEnabled ? true : false;
-    cfg.videoRotationDegrees = (int)videoRotationDegrees;
+    _cfg = gf::StabilizerConfig{};
+    _cfg.pitchSmoothness = pitchSmoothness;
+    _cfg.yawSmoothness = yawSmoothness;
+    _cfg.rollSmoothness = rollSmoothness;
+    _cfg.velocityDamping = damping;
+    _cfg.timeOffsetMs = offsetMs;
+    _cfg.maxZoomLimit = maxZoomLimit;
+    _cfg.horizonLockEnabled = horizonLockEnabled ? true : false;
+    _cfg.horizonLockAmount = horizonLockAmount;
+    _cfg.horizonTiltOffsetDeg = horizonTiltOffsetDeg;
+    _cfg.rollingShutterCorrection = rollingShutterCorrection ? true : false;
+    _cfg.dynamicZoomEnabled = dynamicZoomEnabled ? true : false;
+    _cfg.motoActionMode = motoActionMode ? true : false;
+    _cfg.videoRotationDegrees = (int)videoRotationDegrees;
 
-    const gf::TrajectoryResult traj = engine.solve(frames, cfg);
-    if (!traj.valid) {
+    _traj = _engine.solve(frames, _cfg);
+    if (!_traj.valid) {
         _plan.valid = NO;
         _plan.errorMessage = @"Trajectory solver failed.";
         return self;
@@ -254,27 +290,39 @@ struct GFWarpFrameUniformsMetal {
         _profile.fy *= focalScaleOverride;
     }
 
-    const double fps = (hdr.nominal_fps > 1.0) ? hdr.nominal_fps : 30.0;
+    _fps = (hdr.nominal_fps > 1.0) ? hdr.nominal_fps : 30.0;
+    _sidecarFrames = frames;
+    _edgeFillMode = (edgeFillMode == 1) ? gf::EdgeFillMode::TemporalFullFrame :
+                    ((edgeFillMode == 2) ? gf::EdgeFillMode::MirrorEdge : gf::EdgeFillMode::StandardCrop);
+    _fovScaleBoost = std::min(1.0, std::max(0.0, fovScaleBoost));
+    _sharpenStrength = std::min(1.0, std::max(0.0, sharpenStrength));
+    _hybridTracker.reset(_profile, _traj, _cfg.motoActionMode);
+
     const gf::WarpComputationResult warpRes = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
-        engine,
-        traj,
+        _engine,
+        _traj,
         _profile,
-        fps,
+        _fps,
         maxZoomLimit,
-        cfg.rollingShutterCorrection,
-        cfg.dynamicZoomEnabled
+        _cfg.rollingShutterCorrection,
+        _cfg.dynamicZoomEnabled,
+        nullptr,
+        nullptr,
+        _edgeFillMode,
+        _fovScaleBoost
     );
 
     _frameLUTs = std::move(warpRes.frameLUTs);
+    _adjustedSmoothQuats = warpRes.adjustedSmoothQuats;
     _plan.frameCount = _frameLUTs.size();
-    _plan.stabilityImprovementPct = traj.stabilityImprovementPct;
+    _plan.stabilityImprovementPct = _traj.stabilityImprovementPct;
     _plan.minZoom = warpRes.minZoom;
     _plan.maxZoom = warpRes.maxZoom;
     _plan.avgZoom = warpRes.avgZoom;
-    _plan.maxInputRollDeg = traj.maxInputRollDeg;
-    _plan.maxOutputRollErrorDeg = traj.maxOutputRollErrorDeg;
-    _plan.maxCorrectionDeg = traj.maxCorrectionDeg;
-    const int quadDeg = traj.detectedGravityQuadrantDeg;
+    _plan.maxInputRollDeg = _traj.maxInputRollDeg;
+    _plan.maxOutputRollErrorDeg = _traj.maxOutputRollErrorDeg;
+    _plan.maxCorrectionDeg = _traj.maxCorrectionDeg;
+    const int quadDeg = _traj.detectedGravityQuadrantDeg;
     if (quadDeg == 90 || quadDeg == 270) {
         _plan.detectedOrientationName = [NSString stringWithFormat:@"Auto-Portrait (%d°)", quadDeg];
     } else {
@@ -289,11 +337,11 @@ struct GFWarpFrameUniformsMetal {
                                   std::fabs(m[3]) < 1e-3f) ? YES : NO;
         _plan.gpuMatrixProof = [NSString stringWithFormat:
             @"MidFrame H: diag=(%.3f, %.3f) | rot=(%.3f, %.3f) | inputTilt=%.1f° -> outErr=%.2f°",
-            m[0], m[4], m[1], m[3], traj.maxInputRollDeg, traj.maxOutputRollErrorDeg];
+            m[0], m[4], m[1], m[3], _traj.maxInputRollDeg, _traj.maxOutputRollErrorDeg];
     }
     _plan.width = _profile.width;
     _plan.height = _profile.height;
-    _plan.nominalFps = fps;
+    _plan.nominalFps = _fps;
 
     _device = MTLCreateSystemDefaultDevice();
     if (!_device) {
@@ -342,6 +390,66 @@ struct GFWarpFrameUniformsMetal {
 
     _plan.valid = YES;
     return self;
+}
+
+- (void)pushHybridResidualPixelBuffer:(CVPixelBufferRef)pixelBuffer timestampSec:(double)ts {
+    if (!pixelBuffer) {
+        return;
+    }
+    CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+    const size_t srcW = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0);
+    const size_t srcH = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0);
+    const size_t stride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0);
+    const uint8_t *base = (const uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0);
+
+    if (base && srcW >= 64 && srcH >= 64) {
+        const int ds = 4;
+        const int dstW = (int)(srcW / ds);
+        const int dstH = (int)(srcH / ds);
+        gf::OpticalFlowFrame f;
+        f.timestampSec = ts;
+        f.width = dstW;
+        f.height = dstH;
+        f.luma.resize((size_t)(dstW * dstH));
+
+        for (int y = 0; y < dstH; ++y) {
+            const uint8_t *srcRow = base + (size_t)(y * ds) * stride;
+            uint8_t *dstRow = f.luma.data() + (size_t)(y * dstW);
+            for (int x = 0; x < dstW; ++x) {
+                dstRow[x] = srcRow[x * ds];
+            }
+        }
+        _hybridTracker.pushFrame(f);
+    }
+    CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+}
+
+- (void)finalizeHybridResidual {
+    const gf::HybridResidualResult hr = _hybridTracker.finalize(_fps);
+    if (!hr.valid) {
+        return;
+    }
+    _residualShiftX = hr.shiftX;
+    _residualShiftY = hr.shiftY;
+    const gf::WarpComputationResult warpRes = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
+        _engine,
+        _traj,
+        _profile,
+        _fps,
+        _cfg.maxZoomLimit,
+        _cfg.rollingShutterCorrection,
+        _cfg.dynamicZoomEnabled,
+        &_residualShiftX,
+        &_residualShiftY,
+        _edgeFillMode,
+        _fovScaleBoost
+    );
+    _frameLUTs = std::move(warpRes.frameLUTs);
+    _adjustedSmoothQuats = warpRes.adjustedSmoothQuats;
+    _plan.minZoom = warpRes.minZoom;
+    _plan.maxZoom = warpRes.maxZoom;
+    _plan.avgZoom = warpRes.avgZoom;
+    _plan.hybridResidualMaxPx = hr.maxAmplitudePx;
 }
 
 - (BOOL)warpPixelBuffer:(CVPixelBufferRef)srcPixelBuffer
@@ -405,6 +513,75 @@ struct GFWarpFrameUniformsMetal {
         lumaU.slices[s].hRow1 = simd_make_float4(lut.sliceH[s][3], lut.sliceH[s][4], lut.sliceH[s][5], 0.0f);
         lumaU.slices[s].hRow2 = simd_make_float4(lut.sliceH[s][6], lut.sliceH[s][7], lut.sliceH[s][8], 0.0f);
     }
+
+    int activeHistCount = 0;
+    float gains[3] = {1.0f, 1.0f, 1.0f};
+    CVMetalTextureRef histYRefs[3] = {nullptr, nullptr, nullptr};
+    CVMetalTextureRef histUVRefs[3] = {nullptr, nullptr, nullptr};
+    id<MTLTexture> histYTex[3] = {srcYTex, srcYTex, srcYTex};
+    id<MTLTexture> histUVTex[3] = {srcUVTex, srcUVTex, srcUVTex};
+
+    if (_edgeFillMode == gf::EdgeFillMode::TemporalFullFrame) {
+        const gf::Quat qTarget = (clampedIdx < _adjustedSmoothQuats.size())
+            ? _adjustedSmoothQuats[clampedIdx]
+            : ((clampedIdx < _traj.smoothFrameQuats.size()) ? _traj.smoothFrameQuats[clampedIdx] : gf::Quat::identity());
+        const double sxOff = (clampedIdx < _residualShiftX.size()) ? _residualShiftX[clampedIdx] : 0.0;
+        const double syOff = (clampedIdx < _residualShiftY.size()) ? _residualShiftY[clampedIdx] : 0.0;
+
+        float curExpIso = 1.0f;
+        if (clampedIdx < _sidecarFrames.size()) {
+            curExpIso = std::max(1e-6f, _sidecarFrames[clampedIdx].exposure_duration_sec * std::max(1.0f, _sidecarFrames[clampedIdx].iso));
+        }
+
+        for (int h = 0; h < 3; ++h) {
+            if (!_histSlots[h].pb) {
+                continue;
+            }
+            const NSUInteger hIdx = (_histSlots[h].frameIndex < _traj.rawFrameQuats.size())
+                ? _histSlots[h].frameIndex
+                : (_traj.rawFrameQuats.size() - 1);
+            const size_t hw = CVPixelBufferGetWidth(_histSlots[h].pb);
+            const size_t hh = CVPixelBufferGetHeight(_histSlots[h].pb);
+            if (hw != srcW || hh != srcH) {
+                continue;
+            }
+            CVReturn rY = CVMetalTextureCacheCreateTextureFromImage(
+                kCFAllocatorDefault, _textureCache, _histSlots[h].pb, nullptr,
+                MTLPixelFormatR8Unorm, hw, hh, 0, &histYRefs[activeHistCount]
+            );
+            CVReturn rUV = CVMetalTextureCacheCreateTextureFromImage(
+                kCFAllocatorDefault, _textureCache, _histSlots[h].pb, nullptr,
+                MTLPixelFormatRG8Unorm, hw / 2, hh / 2, 1, &histUVRefs[activeHistCount]
+            );
+            if (rY == kCVReturnSuccess && rUV == kCVReturnSuccess && histYRefs[activeHistCount] && histUVRefs[activeHistCount]) {
+                histYTex[activeHistCount] = CVMetalTextureGetTexture(histYRefs[activeHistCount]);
+                histUVTex[activeHistCount] = CVMetalTextureGetTexture(histUVRefs[activeHistCount]);
+
+                const gf::Quat qRawHist = _traj.rawFrameQuats[hIdx];
+                const gf::Quat qHistCorr = (qRawHist.conjugate() * qTarget).normalized();
+                float hMat[9];
+                gf::FrameWarpCalculator::computeInverseHomography(
+                    qHistCorr, _profile.fx, _profile.fy, _profile.cx, _profile.cy,
+                    (double)lut.zoomUsed, hMat, sxOff, syOff
+                );
+                lumaU.histH[activeHistCount].hRow0 = simd_make_float4(hMat[0], hMat[1], hMat[2], 0.0f);
+                lumaU.histH[activeHistCount].hRow1 = simd_make_float4(hMat[3], hMat[4], hMat[5], 0.0f);
+                lumaU.histH[activeHistCount].hRow2 = simd_make_float4(hMat[6], hMat[7], hMat[8], 0.0f);
+
+                if (hIdx < _sidecarFrames.size()) {
+                    const float hExpIso = std::max(1e-6f, _sidecarFrames[hIdx].exposure_duration_sec * std::max(1.0f, _sidecarFrames[hIdx].iso));
+                    gains[activeHistCount] = std::min(1.35f, std::max(0.75f, curExpIso / hExpIso));
+                }
+                ++activeHistCount;
+            } else {
+                if (histYRefs[activeHistCount]) { CFRelease(histYRefs[activeHistCount]); histYRefs[activeHistCount] = nullptr; }
+                if (histUVRefs[activeHistCount]) { CFRelease(histUVRefs[activeHistCount]); histUVRefs[activeHistCount] = nullptr; }
+            }
+        }
+    }
+
+    lumaU.histGains = simd_make_float4(gains[0], gains[1], gains[2], 1.0f);
+    lumaU.polishParams = simd_make_float4((float)(int)_edgeFillMode, (float)_sharpenStrength, lut.zoomUsed, (float)activeHistCount);
     lumaU.outSize = simd_make_uint2((uint32_t)dstW, (uint32_t)dstH);
     lumaU.inSize = simd_make_uint2((uint32_t)srcW, (uint32_t)srcH);
     lumaU.lumaOutSize = simd_make_uint2((uint32_t)dstW, (uint32_t)dstH);
@@ -418,6 +595,9 @@ struct GFWarpFrameUniformsMetal {
     [enc setComputePipelineState:_lumaPSO];
     [enc setTexture:srcYTex atIndex:0];
     [enc setTexture:dstYTex atIndex:1];
+    [enc setTexture:histYTex[0] atIndex:2];
+    [enc setTexture:histYTex[1] atIndex:3];
+    [enc setTexture:histYTex[2] atIndex:4];
     [enc setBytes:&lumaU length:sizeof(GFWarpFrameUniformsMetal) atIndex:0];
     [enc dispatchThreadgroups:lumaGroups threadsPerThreadgroup:tgSize];
 
@@ -430,6 +610,9 @@ struct GFWarpFrameUniformsMetal {
     [enc setComputePipelineState:_chromaPSO];
     [enc setTexture:srcUVTex atIndex:0];
     [enc setTexture:dstUVTex atIndex:1];
+    [enc setTexture:histUVTex[0] atIndex:2];
+    [enc setTexture:histUVTex[1] atIndex:3];
+    [enc setTexture:histUVTex[2] atIndex:4];
     [enc setBytes:&chromaU length:sizeof(GFWarpFrameUniformsMetal) atIndex:0];
     [enc dispatchThreadgroups:chromaGroups threadsPerThreadgroup:tgSize];
 
@@ -437,6 +620,12 @@ struct GFWarpFrameUniformsMetal {
     [cmdBuf commit];
     [cmdBuf waitUntilCompleted];
 
+    for (int i = 0; i < 3; ++i) {
+        histYTex[i] = nil;
+        histUVTex[i] = nil;
+        if (histYRefs[i]) CFRelease(histYRefs[i]);
+        if (histUVRefs[i]) CFRelease(histUVRefs[i]);
+    }
     srcYTex = nil;
     srcUVTex = nil;
     dstYTex = nil;
@@ -451,12 +640,35 @@ struct GFWarpFrameUniformsMetal {
     CFRelease(dstUVRef);
     dstUVRef = nullptr;
 
+    // Update 3-frame temporal ring buffer (slot 0: i-1, slot 1: ~i-4, slot 2: ~i-8)
+    if (_edgeFillMode == gf::EdgeFillMode::TemporalFullFrame) {
+        if (_histSlots[0].pb && (!_histSlots[1].pb || (frameIndex >= _histSlots[1].frameIndex + 4))) {
+            if (_histSlots[1].pb && (!_histSlots[2].pb || (frameIndex >= _histSlots[2].frameIndex + 8))) {
+                if (_histSlots[2].pb) CFRelease(_histSlots[2].pb);
+                _histSlots[2] = _histSlots[1];
+                _histSlots[1] = _histSlots[0];
+                _histSlots[0].pb = nullptr;
+            } else {
+                if (_histSlots[1].pb) CFRelease(_histSlots[1].pb);
+                _histSlots[1] = _histSlots[0];
+                _histSlots[0].pb = nullptr;
+            }
+        }
+        if (_histSlots[0].pb) {
+            CFRelease(_histSlots[0].pb);
+        }
+        CFRetain(srcPixelBuffer);
+        _histSlots[0].pb = srcPixelBuffer;
+        _histSlots[0].frameIndex = frameIndex;
+    }
+
     CVMetalTextureCacheFlush(_textureCache, 0);
 
     return (cmdBuf.status == MTLCommandBufferStatusCompleted);
 }
 
 - (void)flushTextureCache {
+    [self releaseHistoryBuffers];
     if (_textureCache) {
         CVMetalTextureCacheFlush(_textureCache, 0);
     }

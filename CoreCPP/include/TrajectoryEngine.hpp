@@ -21,6 +21,7 @@ struct StabilizerConfig {
     double horizonTiltOffsetDeg = 0.0;
     bool rollingShutterCorrection = true;
     bool dynamicZoomEnabled = true;
+    bool motoActionMode = false;
     int videoRotationDegrees = 0;    // 0, 90, 180, 270 from AVAssetTrack.preferredTransform
     double axisMatrix[9] = {0, -1, 0, -1, 0, 0, 0, 0, -1};
     bool hasCustomAxisMatrix = false;
@@ -36,6 +37,7 @@ struct TrajectoryResult {
     double maxInputRollDeg = 0.0;
     double maxOutputRollErrorDeg = 0.0;
     double maxCorrectionDeg = 0.0;
+    double maxSwingCapDeg = 11.0;
     int detectedGravityQuadrantDeg = 0;
     double avgPanRatio = 0.0;
     bool valid = false;
@@ -47,7 +49,8 @@ public:
         const GFFileHeader& header,
         const std::vector<GFGyroRecord>& gyroRecords,
         const std::vector<GFAccelRecord>& accelRecords,
-        const double* customAxisMatrix = nullptr
+        const double* customAxisMatrix = nullptr,
+        bool motoActionMode = false
     );
 
     Quat sampleRawQuaternionAt(double timestampSec) const;
