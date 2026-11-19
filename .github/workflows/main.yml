@@ -35,6 +35,12 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - name: Ensure AppIcon assets exist
+        run: |
+          if [ ! -f "App/Assets.xcassets/AppIcon.appiconset/Icon-60@2x.png" ]; then
+            python3 scripts/generate_appicon.py
+          fi
+
       - name: Generate Xcode project
         run: xcodegen generate
 
@@ -52,9 +58,19 @@ jobs:
             SYMROOT="$PWD/build" \
             build
 
-      - name: Package Sideloadly-ready IPA
+      - name: Verify iOS 12 AppIcon & Package Sideloadly-ready IPA
         run: |
           APP_PATH="build/Release-iphoneos/GyroStabilizer5s.app"
+          test -f "$APP_PATH/Assets.car" || { echo "Missing Assets.car"; exit 1; }
+          if [ ! -f "$APP_PATH/AppIcon60x60@2x.png" ]; then
+            cp "App/Assets.xcassets/AppIcon.appiconset/Icon-60@2x.png" "$APP_PATH/AppIcon60x60@2x.png"
+          fi
+          /usr/libexec/PlistBuddy -c "Print :CFBundleIcons:CFBundlePrimaryIcon" "$APP_PATH/Info.plist" >/dev/null 2>&1 || {
+            /usr/libexec/PlistBuddy -c "Add :CFBundleIcons dict" "$APP_PATH/Info.plist"
+            /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon dict" "$APP_PATH/Info.plist"
+            /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles array" "$APP_PATH/Info.plist"
+            /usr/libexec/PlistBuddy -c "Add :CFBundleIcons:CFBundlePrimaryIcon:CFBundleIconFiles:0 string AppIcon60x60" "$APP_PATH/Info.plist"
+          }
           mkdir -p dist/Payload
           cp -R "$APP_PATH" dist/Payload/
           (cd dist && zip -qr GyroStabilizer5s-ios12-arm64.ipa Payload)
