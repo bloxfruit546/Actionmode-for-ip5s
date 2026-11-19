@@ -271,7 +271,7 @@ struct GFHistSlot {
         return self;
     }
 
-    _profile = (hdr.capture_mode == 1)
+    _profile = (hdr.capture_mode == 1 || hdr.capture_mode == 2)
         ? gf::CalibrationProfile::defaultIPhone5s720p120()
         : gf::CalibrationProfile::defaultIPhone5s1080p30();
     if (hdr.width > 0 && hdr.height > 0 && hdr.lens_fx > 10.0) {

@@ -134,6 +134,9 @@ final class TakeDetailViewController: UIViewController {
             ? "VIRTUAL GYRO (OPTICAL RANSAC)\n        Note: Horizon Lock is Best-Effort (no real Accel)."
             : "HARDWARE IMU (90Hz MEMS)"
 
+        let minShutterDenom = (s.minExposureMs > 0.01) ? (1000.0 / s.minExposureMs) : 0.0
+        let maxShutterDenom = (s.maxExposureMs > 0.01) ? (1000.0 / s.maxExposureMs) : 0.0
+
         summaryTextView.text = String(format: """
         Take UUID     : %@
         Source        : %@
@@ -151,7 +154,7 @@ final class TakeDetailViewController: UIViewController {
         Accel Samples : %llu (%.2f Hz)
         Video Frames  : %llu (avg %.2f fps)
         Dropped Frames: %u
-        Exposure Range: %.2f ms .. %.2f ms
+        Exposure Range: %.2f .. %.2f ms (1/%.0f .. 1/%.0f s)
         Sync Coverage : %@
         Error         : %@
         """,
@@ -169,7 +172,7 @@ final class TakeDetailViewController: UIViewController {
         s.accelCount, s.accelHz,
         s.frameCount, s.avgFps,
         s.droppedFrames,
-        s.minExposureMs, s.maxExposureMs,
+        s.minExposureMs, s.maxExposureMs, minShutterDenom, maxShutterDenom,
         s.syncCoverageOk ? "PASS" : "WARN",
         s.errorMessage.isEmpty ? "None" : s.errorMessage)
     }

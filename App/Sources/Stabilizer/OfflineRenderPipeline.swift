@@ -303,12 +303,14 @@ final class OfflineRenderPipeline {
 
                 let targetMbps = max(20, min(60, config.exportBitrateMbps > 0 ? config.exportBitrateMbps : ((height >= 1000) ? 45 : 35)))
                 let bitrate = targetMbps * 1_000_000
+                let fpsInt = max(1, Int(round(plan.nominalFps > 1 ? plan.nominalFps : 30)))
                 let compressionProps: [String: Any] = [
                     AVVideoAverageBitRateKey: bitrate,
                     AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
                     AVVideoH264EntropyModeKey: AVVideoH264EntropyModeCABAC,
                     AVVideoAllowFrameReorderingKey: true,
-                    AVVideoExpectedSourceFrameRateKey: Int(plan.nominalFps > 1 ? plan.nominalFps : 30)
+                    AVVideoMaxKeyFrameIntervalKey: max(1, fpsInt / 2),
+                    AVVideoExpectedSourceFrameRateKey: fpsInt
                 ]
                 let videoWriterSettings: [String: Any] = [
                     AVVideoCodecKey: AVVideoCodecType.h264,

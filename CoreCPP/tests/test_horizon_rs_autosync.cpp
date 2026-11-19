@@ -1598,6 +1598,97 @@ void testPortraitIntrinsicsAndZeroZoomSpike() {
                 zPeak, zAfter125ms, zAfter1s, pSync.bestNCC, pSync.effectiveFocalScale);
 }
 
+void test720p60ActionPipeline() {
+    const auto prof = gf::CalibrationProfile::defaultIPhone5s720p120();
+    assert(prof.width == 1280 && prof.height == 720);
+    assert(std::fabs(prof.fx - 1210.0) < 1e-3);
+
+    // 2.0s @ 60fps video (120 frames, dt=16.67ms) + 90Hz IMU (180 samples)
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.capture_mode = 2; // 720p60
+    hdr.width = 1280;
+    hdr.height = 720;
+    hdr.nominal_fps = 60.0;
+    hdr.readout_time_sec = 0.0074;
+    hdr.lens_fx = prof.fx;
+    hdr.lens_fy = prof.fy;
+    hdr.lens_cx = prof.cx;
+    hdr.lens_cy = prof.cy;
+
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    const double shakeAmp = 4.5 * (kPi / 180.0);
+    const double wFreq = 2.0 * kPi * 2.0;
+    for (int i = 0; i < 180; ++i) {
+        const double t = i / 90.0;
+        const double dYaw = shakeAmp * wFreq * std::cos(wFreq * t);
+        gyro.push_back({t, -dYaw, 0.0, 0.0});
+        accel.push_back({t, 0.0f, -1.0f, 0.0f});
+    }
+
+    const int vw = 320, vh = 180;
+    const double fxS = prof.fx * 0.25, cxS = 160.0;
+    std::vector<gf::GFFrameRecord> scFrames;
+    std::vector<gf::OpticalFlowFrame> visFrames;
+    for (int f = 0; f < 120; ++f) {
+        const double t = f / 60.0;
+        scFrames.push_back({static_cast<uint32_t>(f), t, 0.005f, 100.0f, 0.88f, 0.0074f});
+        const double yawAng = shakeAmp * std::sin(wFreq * (t + 0.0025 + 0.0037));
+        gf::OpticalFlowFrame frame;
+        frame.timestampSec = t + 0.0025 + 0.0037;
+        frame.width = vw;
+        frame.height = vh;
+        frame.luma.resize(static_cast<size_t>(vw * vh));
+        for (int y = 0; y < vh; ++y) {
+            for (int x = 0; x < vw; ++x) {
+                const double sx = (x - cxS) + yawAng * fxS;
+                const double sy = static_cast<double>(y);
+                const double val = 128.0 + 35.0 * std::sin(sx * 0.07 + sy * 0.05)
+                                         + 25.0 * std::cos(sx * 0.12 - sy * 0.09)
+                                         + 20.0 * std::sin((sx * sx * 0.0006) + sy * 0.15);
+                frame.luma[static_cast<size_t>(y * vw + x)] = static_cast<uint8_t>(std::max(0.0, std::min(255.0, val)));
+            }
+        }
+        visFrames.push_back(std::move(frame));
+    }
+
+    const auto syncRes = gf::OpticalSync::solveSyncAndAxes(visFrames, hdr, gyro, false);
+    assert(syncRes.valid);
+    assert(syncRes.bestNCC > 0.95);
+
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel, syncRes.axisMatrix, false);
+    gf::StabilizerConfig cfg;
+    cfg.pitchSmoothness = 0.85;
+    cfg.yawSmoothness = 0.85;
+    cfg.rollSmoothness = 0.92;
+    cfg.horizonLockEnabled = true;
+
+    const auto traj = engine.solve(scFrames, cfg);
+    assert(traj.valid);
+    assert(traj.stabilityImprovementPct > 95.0);
+
+    const auto warp = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
+        engine, traj, prof, 60.0, 0.0, true, true
+    );
+    assert(warp.packets.size() == 120);
+    for (const auto& pkt : warp.packets) {
+        const float* H = pkt.m;
+        const double corners[4][2] = {{0.0, 0.0}, {1279.0, 0.0}, {1279.0, 719.0}, {0.0, 719.0}};
+        for (const auto& c : corners) {
+            const double wVal = H[6] * c[0] + H[7] * c[1] + H[8];
+            const double us = (H[0] * c[0] + H[1] * c[1] + H[2]) / wVal;
+            const double vs = (H[3] * c[0] + H[4] * c[1] + H[5]) / wVal;
+            assert(us >= 0.0 && us <= 1279.0 && vs >= 0.0 && vs <= 719.0);
+        }
+    }
+
+    std::printf("Test Phase A 720p60 (90Hz IMU / 60fps Video -> NCC=%.3f, Gain=%.2f%%, Zoom=[%.2fx..%.2fx], 0%% black border) PASSED.\n",
+                syncRes.bestNCC, traj.stabilityImprovementPct, warp.minZoom, warp.maxZoom);
+}
+
 } // namespace
 
 int main() {
@@ -1620,5 +1711,6 @@ int main() {
     testMotoEngineBuzz32HzPotholeAndRoadParallax();
     testClassroomAntiPumpingAndStaticRollSettle();
     testPortraitIntrinsicsAndZeroZoomSpike();
+    test720p60ActionPipeline();
     return 0;
 }

@@ -40,10 +40,19 @@ final class CameraViewController: UIViewController {
     }()
 
     private let modeControl: UISegmentedControl = {
-        let sc = UISegmentedControl(items: ["1080p30", "720p120"])
+        let sc = UISegmentedControl(items: ["1080p30", "720p60", "720p120"])
         sc.translatesAutoresizingMaskIntoConstraints = false
         sc.selectedSegmentIndex = 0
         sc.tintColor = UIColor(red: 0.25, green: 0.65, blue: 1.0, alpha: 1.0)
+        sc.backgroundColor = UIColor(white: 0.12, alpha: 0.85)
+        return sc
+    }()
+
+    private let shutterCapControl: UISegmentedControl = {
+        let sc = UISegmentedControl(items: ["1/120s", "1/200s", "1/400s", "Auto"])
+        sc.translatesAutoresizingMaskIntoConstraints = false
+        sc.selectedSegmentIndex = 1 // Action 1/200s default
+        sc.tintColor = UIColor(red: 0.35, green: 0.90, blue: 0.50, alpha: 1.0)
         sc.backgroundColor = UIColor(white: 0.12, alpha: 0.85)
         return sc
     }()
@@ -149,6 +158,7 @@ final class CameraViewController: UIViewController {
 
         modeControl.addTarget(self, action: #selector(handleModeChanged), for: .valueChanged)
         bitrateControl.addTarget(self, action: #selector(handleBitrateChanged), for: .valueChanged)
+        shutterCapControl.addTarget(self, action: #selector(handleShutterCapChanged), for: .valueChanged)
         focusLockBtn.addTarget(self, action: #selector(handleToggleFocus), for: .touchUpInside)
         expLockBtn.addTarget(self, action: #selector(handleToggleExp), for: .touchUpInside)
         antiBlurBtn.addTarget(self, action: #selector(handleToggleAntiBlur), for: .touchUpInside)
@@ -185,8 +195,9 @@ final class CameraViewController: UIViewController {
         view.addSubview(topHudLabel)
         view.addSubview(modeControl)
         view.addSubview(bitrateControl)
+        view.addSubview(shutterCapControl)
 
-        let lockRow = UIStackView(arrangedSubviews: [focusLockBtn, expLockBtn, antiBlurBtn, motoModeBtn])
+        let lockRow = UIStackView(arrangedSubviews: [focusLockBtn, expLockBtn, motoModeBtn])
         lockRow.translatesAutoresizingMaskIntoConstraints = false
         lockRow.axis = .horizontal
         lockRow.spacing = 6
@@ -212,15 +223,20 @@ final class CameraViewController: UIViewController {
 
             modeControl.topAnchor.constraint(equalTo: topHudLabel.bottomAnchor, constant: 8),
             modeControl.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 8),
-            modeControl.widthAnchor.constraint(equalToConstant: 150),
+            modeControl.widthAnchor.constraint(equalToConstant: 196),
             modeControl.heightAnchor.constraint(equalToConstant: 28),
 
             bitrateControl.topAnchor.constraint(equalTo: topHudLabel.bottomAnchor, constant: 8),
             bitrateControl.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -8),
-            bitrateControl.widthAnchor.constraint(equalToConstant: 140),
+            bitrateControl.widthAnchor.constraint(equalToConstant: 102),
             bitrateControl.heightAnchor.constraint(equalToConstant: 28),
 
-            lockRow.topAnchor.constraint(equalTo: modeControl.bottomAnchor, constant: 8),
+            shutterCapControl.topAnchor.constraint(equalTo: modeControl.bottomAnchor, constant: 6),
+            shutterCapControl.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 8),
+            shutterCapControl.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -8),
+            shutterCapControl.heightAnchor.constraint(equalToConstant: 26),
+
+            lockRow.topAnchor.constraint(equalTo: shutterCapControl.bottomAnchor, constant: 6),
             lockRow.leadingAnchor.constraint(equalTo: guide.leadingAnchor, constant: 8),
             lockRow.trailingAnchor.constraint(equalTo: guide.trailingAnchor, constant: -8),
             lockRow.heightAnchor.constraint(equalToConstant: 30),
@@ -261,8 +277,24 @@ final class CameraViewController: UIViewController {
     }
 
     @objc private func handleModeChanged() {
-        let mode: CaptureMode = (modeControl.selectedSegmentIndex == 0) ? .cinema1080p30 : .highSpeed720p120
+        let mode: CaptureMode
+        switch modeControl.selectedSegmentIndex {
+        case 1: mode = .action720p60
+        case 2: mode = .highSpeed720p120
+        default: mode = .cinema1080p30
+        }
         engine.setCaptureMode(mode)
+    }
+
+    @objc private func handleShutterCapChanged() {
+        let ts: Int32
+        switch shutterCapControl.selectedSegmentIndex {
+        case 0: ts = ShutterCeilingMode.indoor120.rawValue
+        case 1: ts = ShutterCeilingMode.action200.rawValue
+        case 2: ts = ShutterCeilingMode.outdoor400.rawValue
+        default: ts = ShutterCeilingMode.autoOff.rawValue
+        }
+        engine.setShutterCapTimescale(ts)
     }
 
     @objc private func handleBitrateChanged() {
@@ -316,14 +348,13 @@ final class CameraViewController: UIViewController {
             : UIColor(white: 0.18, alpha: 0.85)
         motoBannerLabel.isHidden = !next
         if next {
+            shutterCapControl.selectedSegmentIndex = 2 // Outdoor 1/400s
             focusLockBtn.setTitle("Focus: HYP", for: .normal)
             focusLockBtn.setTitleColor(UIColor(red: 1.0, green: 0.80, blue: 0.25, alpha: 1.0), for: .normal)
-            antiBlurBtn.setTitle("AntiBlur: 1/250", for: .normal)
-            antiBlurBtn.setTitleColor(UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0), for: .normal)
         } else {
+            shutterCapControl.selectedSegmentIndex = 1 // Action 1/200s
             focusLockBtn.setTitle("Focus: AUTO", for: .normal)
             focusLockBtn.setTitleColor(.white, for: .normal)
-            antiBlurBtn.setTitle(engine.isAntiBlurCapEnabled ? "AntiBlur: ON" : "AntiBlur: OFF", for: .normal)
         }
     }
 
@@ -345,27 +376,44 @@ extension CameraViewController: ProCameraEngineDelegate {
     func cameraEngineDidUpdateStatus(
         eisOff: Bool,
         iso: Float,
+        maxIso: Float,
         exposureMs: Double,
+        shutterCapDenom: Int32,
+        fps: Double,
+        lumaAvg: Double,
+        isDarkMaxIso: Bool,
         lensPos: Float,
         gyroCount: UInt64,
         frameCount: UInt32,
         recordingDurationSec: Double,
         gyroMagRadSec: Double
     ) {
-        let ramMB = Double(GFSystemProbe.currentPhysFootprintBytes()) / (1024.0 * 1024.0)
+        let shutterDenom = (exposureMs > 0.01) ? Int(round(1000.0 / exposureMs)) : 0
+        let lockTag = (shutterCapDenom > 0) ? "LOCKED <=\(shutterCapDenom)" : "AUTO"
         topHudLabel.text = String(
-            format: "EIS:%@ | ISO:%.0f | %.1fms | L:%.2f | %.0fMB",
-            eisOff ? "OFF" : "ON!", iso, exposureMs, lensPos, ramMB
+            format: "1/%d (%@) | ISO:%.0f/%.0f | %.0ffps | Y:%.2f",
+            shutterDenom, lockTag, iso, maxIso, fps, lumaAvg
         )
+        let compliant = (shutterCapDenom == 0) || (exposureMs <= (1000.0 / Double(shutterCapDenom)) + 0.35)
+        topHudLabel.textColor = (compliant && !isDarkMaxIso)
+            ? UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0)
+            : UIColor(red: 1.0, green: 0.72, blue: 0.25, alpha: 1.0)
+
+        if isDarkMaxIso {
+            shutterWarningLabel.text = "DARK SCENE - MAX ISO REACHED (Recommend 1/120s)"
+            shutterWarningLabel.isHidden = false
+        } else if engine.isRecording && exposureMs > 16.7 && gyroMagRadSec > 1.5 {
+            shutterWarningLabel.text = "LOW SHUTTER (MOTION BLUR RISK) - Recommend <=1/120s"
+            shutterWarningLabel.isHidden = false
+        } else {
+            shutterWarningLabel.isHidden = true
+        }
 
         if engine.isRecording {
             let mins = Int(recordingDurationSec) / 60
             let secs = Int(recordingDurationSec) % 60
             recStatusLabel.textColor = UIColor(red: 1.0, green: 0.35, blue: 0.35, alpha: 1.0)
-            recStatusLabel.text = String(format: "REC %02d:%02d | F:%u | IMU:%llu", mins, secs, frameCount, gyroCount)
-            shutterWarningLabel.isHidden = !(exposureMs > 16.7 && gyroMagRadSec > 1.5)
-        } else {
-            shutterWarningLabel.isHidden = true
+            recStatusLabel.text = String(format: "REC %02d:%02d | F:%u | IMU:%llu | L:%.2f", mins, secs, frameCount, gyroCount, lensPos)
         }
     }
 

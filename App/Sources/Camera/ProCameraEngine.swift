@@ -6,24 +6,26 @@ import Foundation
 enum CaptureMode: UInt32 {
     case cinema1080p30 = 0
     case highSpeed720p120 = 1
+    case action720p60 = 2
 
     var width: Int32 {
         switch self {
         case .cinema1080p30: return 1920
-        case .highSpeed720p120: return 1280
+        case .highSpeed720p120, .action720p60: return 1280
         }
     }
 
     var height: Int32 {
         switch self {
         case .cinema1080p30: return 1080
-        case .highSpeed720p120: return 720
+        case .highSpeed720p120, .action720p60: return 720
         }
     }
 
     var nominalFps: Double {
         switch self {
         case .cinema1080p30: return 30.0
+        case .action720p60: return 60.0
         case .highSpeed720p120: return 120.0
         }
     }
@@ -31,9 +33,17 @@ enum CaptureMode: UInt32 {
     var displayName: String {
         switch self {
         case .cinema1080p30: return "1080p30"
+        case .action720p60: return "720p60"
         case .highSpeed720p120: return "720p120"
         }
     }
+}
+
+enum ShutterCeilingMode: Int32 {
+    case autoOff = 0
+    case indoor120 = 120
+    case action200 = 200
+    case outdoor400 = 400
 }
 
 enum BitratePreset: Int {
@@ -56,7 +66,12 @@ protocol ProCameraEngineDelegate: AnyObject {
     func cameraEngineDidUpdateStatus(
         eisOff: Bool,
         iso: Float,
+        maxIso: Float,
         exposureMs: Double,
+        shutterCapDenom: Int32,
+        fps: Double,
+        lumaAvg: Double,
+        isDarkMaxIso: Bool,
         lensPos: Float,
         gyroCount: UInt64,
         frameCount: UInt32,
@@ -94,10 +109,12 @@ final class ProCameraEngine: NSObject {
     private(set) var isFocusLocked = false
     private(set) var isExposureLocked = false
     private(set) var isAntiBlurCapEnabled = true
-    private(set) var shutterCapTimescale: Int32 = 160
+    private(set) var shutterCapTimescale: Int32 = ShutterCeilingMode.action200.rawValue
     private(set) var isMotoModeEnabled = false
     private(set) var isRecording = false
     private var shutterGuardFrameCounter: Int = 0
+    private var latestLumaAvg: Double = 0.44
+    private var isDarkMaxIsoReached: Bool = false
 
     // Active recording state (guarded by writerQueue)
     private var assetWriter: AVAssetWriter?
@@ -190,6 +207,7 @@ final class ProCameraEngine: NSObject {
             } catch {
                 FileLogger.shared.log("Focus lock error: \(error.localizedDescription)")
             }
+            self.enforceShutterPriorityCustomAE(forceImmediate: true)
         }
     }
 
@@ -209,6 +227,9 @@ final class ProCameraEngine: NSObject {
             } catch {
                 FileLogger.shared.log("Exposure lock error: \(error.localizedDescription)")
             }
+            if !locked {
+                self.enforceShutterPriorityCustomAE(forceImmediate: true)
+            }
         }
     }
 
@@ -226,19 +247,20 @@ final class ProCameraEngine: NSObject {
                         dev.exposureMode = .continuousAutoExposure
                     }
                     dev.activeMaxExposureDuration = .invalid
+                    self.isDarkMaxIsoReached = false
                 }
                 dev.unlockForConfiguration()
             } catch {
                 FileLogger.shared.log("Shutter cap error: \(error.localizedDescription)")
             }
             if timescale > 0 {
-                self.enforceAntiBlurShutterIfNeeded()
+                self.enforceShutterPriorityCustomAE(forceImmediate: true)
             }
         }
     }
 
     func setAntiBlurShutterCap(_ enabled: Bool) {
-        let ts: Int32 = enabled ? (isMotoModeEnabled ? 250 : ((currentMode == .cinema1080p30) ? 160 : 240)) : 0
+        let ts: Int32 = enabled ? (isMotoModeEnabled ? ShutterCeilingMode.outdoor400.rawValue : ShutterCeilingMode.action200.rawValue) : 0
         setShutterCapTimescale(ts)
     }
 
@@ -256,8 +278,8 @@ final class ProCameraEngine: NSObject {
                         dev.focusMode = .locked
                         self.isFocusLocked = true
                     }
-                    self.shutterCapTimescale = 250
-                    dev.activeMaxExposureDuration = CMTime(value: 1, timescale: 250)
+                    self.shutterCapTimescale = ShutterCeilingMode.outdoor400.rawValue
+                    dev.activeMaxExposureDuration = CMTime(value: 1, timescale: self.shutterCapTimescale)
                     self.isAntiBlurCapEnabled = true
                     self.currentBitrate = .mbps50
                 } else {
@@ -265,7 +287,7 @@ final class ProCameraEngine: NSObject {
                         dev.focusMode = .continuousAutoFocus
                         self.isFocusLocked = false
                     }
-                    let capTimescale: Int32 = (self.currentMode == .cinema1080p30) ? 160 : 240
+                    let capTimescale = ShutterCeilingMode.action200.rawValue
                     self.shutterCapTimescale = self.isAntiBlurCapEnabled ? capTimescale : 0
                     dev.activeMaxExposureDuration = self.isAntiBlurCapEnabled ? CMTime(value: 1, timescale: capTimescale) : .invalid
                     self.currentBitrate = .mbps45
@@ -274,7 +296,7 @@ final class ProCameraEngine: NSObject {
             } catch {
                 FileLogger.shared.log("Moto Mode error: \(error.localizedDescription)")
             }
-            self.enforceAntiBlurShutterIfNeeded()
+            self.enforceShutterPriorityCustomAE(forceImmediate: true)
         }
     }
 
@@ -285,7 +307,7 @@ final class ProCameraEngine: NSObject {
             let paths = CaptureTakeStore.makeNewTakePaths()
             let calib = CalibrationManager.shared.current
             let mode = self.currentMode
-            let bitrate = self.currentBitrate.rawValue
+            let bitrate = (mode == .action720p60 && self.currentBitrate == .mbps45) ? 35_000_000 : self.currentBitrate.rawValue
 
             let readoutSec: Double
             let fx: Double
@@ -336,10 +358,13 @@ final class ProCameraEngine: NSObject {
 
             do {
                 let writer = try AVAssetWriter(outputURL: paths.movURL, fileType: .mov)
+                let fpsInt = Int(mode.nominalFps)
                 let compressionProps: [String: Any] = [
                     AVVideoAverageBitRateKey: bitrate,
                     AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
-                    AVVideoExpectedSourceFrameRateKey: Int(mode.nominalFps)
+                    AVVideoH264EntropyModeKey: AVVideoH264EntropyModeCABAC,
+                    AVVideoMaxKeyFrameIntervalKey: max(1, fpsInt / 2),
+                    AVVideoExpectedSourceFrameRateKey: fpsInt
                 ]
                 let videoSettings: [String: Any] = [
                     AVVideoCodecKey: AVVideoCodecType.h264,
@@ -551,18 +576,22 @@ final class ProCameraEngine: NSObject {
         let targetFps = currentMode.nominalFps
 
         var chosenFormat: AVCaptureDevice.Format?
+        var bestMaxFps: Double = 0.0
         for format in device.formats {
             let desc = format.formatDescription
             let dims = CMVideoFormatDescriptionGetDimensions(desc)
             if dims.width == targetW && dims.height == targetH {
-                let supportsFps = format.videoSupportedFrameRateRanges.contains { range in
-                    range.maxFrameRate >= targetFps && range.minFrameRate <= targetFps
-                }
-                if supportsFps {
-                    chosenFormat = format
+                let matchingMaxFps = format.videoSupportedFrameRateRanges
+                    .filter { $0.maxFrameRate >= targetFps && $0.minFrameRate <= targetFps }
+                    .map { $0.maxFrameRate }
+                    .max() ?? 0.0
+                if matchingMaxFps > 0.0 {
                     let subType = CMFormatDescriptionGetMediaSubType(desc)
-                    if subType == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange {
-                        break
+                    let isFullRange = (subType == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)
+                    // For 720p60/120, prefer >=120fps format for 7.4ms fast readout; break on exact FullRange match
+                    if chosenFormat == nil || matchingMaxFps > bestMaxFps || (matchingMaxFps == bestMaxFps && isFullRange) {
+                        chosenFormat = format
+                        bestMaxFps = matchingMaxFps
                     }
                 }
             }
@@ -580,14 +609,16 @@ final class ProCameraEngine: NSObject {
             device.activeVideoMinFrameDuration = frameDuration
             device.activeVideoMaxFrameDuration = frameDuration
 
-            if isAntiBlurCapEnabled {
-                let capTimescale: Int32 = (currentMode == .cinema1080p30) ? 120 : 240
-                device.activeMaxExposureDuration = CMTime(value: 1, timescale: capTimescale)
+            if isAntiBlurCapEnabled && shutterCapTimescale > 0 {
+                device.activeMaxExposureDuration = CMTime(value: 1, timescale: shutterCapTimescale)
             } else {
                 device.activeMaxExposureDuration = .invalid
             }
             device.unlockForConfiguration()
         } catch {
+            FileLogger.shared.log("CameraEngine format config error: \(error.localizedDescription)")
+        }
+        enforceShutterPriorityCustomAE(forceImmediate: true)
             FileLogger.shared.log("applyFormat error: \(error.localizedDescription)")
         }
 
@@ -693,44 +724,93 @@ final class ProCameraEngine: NSObject {
         }
     }
 
-    private func enforceAntiBlurShutterIfNeeded() {
+    private func enforceShutterPriorityCustomAE(forceImmediate: Bool) {
         let capTimescale = shutterCapTimescale
         guard isAntiBlurCapEnabled, capTimescale > 0, !isExposureLocked, let dev = videoDevice else { return }
         guard dev.isExposureModeSupported(.custom) else { return }
+        if !forceImmediate && dev.isAdjustingExposure {
+            return
+        }
 
-        let maxAllowedSec = 1.0 / Double(capTimescale)
-        let currentExpSec = CMTimeGetSeconds(dev.exposureDuration)
+        let ceilingSec = 1.0 / Double(capTimescale)
+        let minISO = dev.activeFormat.minISO
+        let maxISO = dev.activeFormat.maxISO
+        let hwMinDur = max(CMTimeGetSeconds(dev.activeFormat.minExposureDuration), 1.0 / 4000.0)
+        let curDur = min(ceilingSec, max(hwMinDur, CMTimeGetSeconds(dev.exposureDuration)))
+        let curISO = min(maxISO, max(minISO, dev.iso))
 
-        // Enforce hard hardware shutter floor <= 1/capTimescale (e.g., 1/160s = 6.25ms) even indoors
-        if currentExpSec > maxAllowedSec + 0.0003 || dev.exposureMode == .custom {
-            let offset = Double(dev.exposureTargetOffset)
-            // If bright enough at minISO and clamped shutter, return to continuousAutoExposure for faster shutters
-            if dev.exposureMode == .custom && dev.iso <= dev.activeFormat.minISO * 1.05 && offset > 0.35 {
-                if dev.isExposureModeSupported(.continuousAutoExposure) {
-                    do {
-                        try dev.lockForConfiguration()
-                        dev.exposureMode = .continuousAutoExposure
-                        dev.activeMaxExposureDuration = CMTime(value: 1, timescale: capTimescale)
-                        dev.unlockForConfiguration()
-                    } catch {}
-                }
+        var newDur = curDur
+        var newISO = curISO
+
+        if forceImmediate || dev.exposureMode != .custom {
+            // Lock .custom immediately before frame 0 so 0.00-0.25s NEVER falls back to 1/30s Auto Exposure
+            let evTotal = curDur * Double(curISO)
+            if evTotal <= ceilingSec * Double(minISO) {
+                newISO = minISO
+                newDur = min(ceilingSec, max(hwMinDur, evTotal / Double(minISO)))
+            } else {
+                newDur = ceilingSec
+                newISO = min(maxISO, max(minISO, Float(evTotal / ceilingSec)))
+            }
+        } else {
+            let yAvg = max(0.02, min(0.98, latestLumaAvg))
+            let lumaErrEv = log2(0.44 / yAvg)
+            let hwOffsetEv = -Double(dev.exposureTargetOffset)
+            let evNeed = 0.45 * lumaErrEv + 0.55 * hwOffsetEv
+
+            if abs(evNeed) < 0.08 {
                 return
             }
 
-            let gainFactor = Float(pow(2.0, -offset * 0.5))
-            let rawTargetISO = dev.iso * gainFactor
-            let clampedISO = min(dev.activeFormat.maxISO, max(dev.activeFormat.minISO, rawTargetISO))
-
-            do {
-                try dev.lockForConfiguration()
-                dev.setExposureModeCustom(
-                    duration: CMTime(value: 1, timescale: capTimescale),
-                    iso: clampedISO,
-                    completionHandler: nil
-                )
-                dev.unlockForConfiguration()
-            } catch {}
+            let gainFactor = pow(2.0, evNeed * 0.35)
+            let evTotal = curDur * Double(curISO) * gainFactor
+            if evTotal <= ceilingSec * Double(minISO) {
+                newISO = minISO
+                newDur = min(ceilingSec, max(hwMinDur, evTotal / Double(minISO)))
+            } else {
+                newDur = ceilingSec
+                newISO = min(maxISO, max(minISO, Float(evTotal / ceilingSec)))
+            }
         }
+
+        isDarkMaxIsoReached = (newISO >= maxISO * 0.96 && newDur >= ceilingSec * 0.98)
+
+        do {
+            try dev.lockForConfiguration()
+            dev.setExposureModeCustom(
+                duration: CMTimeMakeWithSeconds(newDur, preferredTimescale: 1_000_000),
+                iso: newISO,
+                completionHandler: nil
+            )
+            dev.unlockForConfiguration()
+        } catch {}
+    }
+
+    private func computeCenterWeightedLuma(_ pixelBuffer: CVPixelBuffer) -> Double {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0) else { return 0.44 }
+        let w = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0)
+        let h = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+        let stride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+        let ptr = base.assumingMemoryBound(to: UInt8.self)
+
+        let x0 = w / 6, x1 = (w * 5) / 6
+        let y0 = h / 6, y1 = (h * 5) / 6
+        var sum: Double = 0.0
+        var count: Double = 0.0
+        var y = y0
+        while y < y1 {
+            let row = ptr + y * stride
+            var x = x0
+            while x < x1 {
+                sum += Double(row[x])
+                count += 1.0
+                x += 16
+            }
+            y += 16
+        }
+        return (count > 0.0) ? (sum / (count * 255.0)) : 0.44
     }
 
     private func startTelemetryTimer() {
@@ -739,9 +819,14 @@ final class ProCameraEngine: NSObject {
         timer.schedule(deadline: .now() + 0.2, repeating: 0.25)
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
-            self.enforceAntiBlurShutterIfNeeded()
+            self.enforceShutterPriorityCustomAE(forceImmediate: false)
             let iso = self.videoDevice?.iso ?? 0
+            let maxIso = self.videoDevice?.activeFormat.maxISO ?? 1600
             let expMs = self.videoDevice.map { CMTimeGetSeconds($0.exposureDuration) * 1000.0 } ?? 0.0
+            let capDenom = self.isAntiBlurCapEnabled ? self.shutterCapTimescale : 0
+            let fps = self.currentMode.nominalFps
+            let luma = self.latestLumaAvg
+            let darkMax = self.isDarkMaxIsoReached
             let lens = self.videoDevice?.lensPosition ?? 0
             let eis = self.isEISOff
 
@@ -763,7 +848,12 @@ final class ProCameraEngine: NSObject {
                 self.delegate?.cameraEngineDidUpdateStatus(
                     eisOff: eis,
                     iso: iso,
+                    maxIso: maxIso,
                     exposureMs: expMs,
+                    shutterCapDenom: capDenom,
+                    fps: fps,
+                    lumaAvg: luma,
+                    isDarkMaxIso: darkMax,
                     lensPos: lens,
                     gyroCount: gyros,
                     frameCount: frames,
@@ -790,9 +880,12 @@ extension ProCameraEngine: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptu
     ) {
         if output === videoOutput {
             shutterGuardFrameCounter += 1
-            if shutterGuardFrameCounter % 3 == 0 && isAntiBlurCapEnabled && !isExposureLocked {
+            if shutterGuardFrameCounter % 4 == 0 && isAntiBlurCapEnabled && !isExposureLocked {
+                if let pb = CMSampleBufferGetImageBuffer(sampleBuffer) {
+                    latestLumaAvg = computeCenterWeightedLuma(pb)
+                }
                 sessionQueue.async { [weak self] in
-                    self?.enforceAntiBlurShutterIfNeeded()
+                    self?.enforceShutterPriorityCustomAE(forceImmediate: false)
                 }
             }
         }
