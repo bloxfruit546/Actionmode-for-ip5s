@@ -616,11 +616,9 @@ final class ProCameraEngine: NSObject {
             }
             device.unlockForConfiguration()
         } catch {
-            FileLogger.shared.log("CameraEngine format config error: \(error.localizedDescription)")
-        }
-        enforceShutterPriorityCustomAE(forceImmediate: true)
             FileLogger.shared.log("applyFormat error: \(error.localizedDescription)")
         }
+        enforceShutterPriorityCustomAE(forceImmediate: true)
 
         if let conn = videoOutput.connection(with: .video) {
             if conn.isVideoStabilizationSupported {
