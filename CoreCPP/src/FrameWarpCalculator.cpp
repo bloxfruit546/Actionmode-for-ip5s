@@ -35,16 +35,16 @@ void FrameWarpCalculator::computeInverseHomography(
     double cy,
     double zoom,
     float outH[9],
-    double cxVirtOffset,
-    double cyVirtOffset
+    double shiftXBase,
+    double shiftYBase
 ) {
     double R[9];
     computeRotationMatrix3x3(qCorr, R);
 
     const double invFxZ = 1.0 / (fx * zoom);
     const double invFyZ = 1.0 / (fy * zoom);
-    const double tx = -(cx + cxVirtOffset) * invFxZ;
-    const double ty = -(cy + cyVirtOffset) * invFyZ;
+    const double tx = -cx * invFxZ + (shiftXBase / fx);
+    const double ty = -cy * invFyZ + (shiftYBase / fy);
 
     double B[9];
     B[0] = R[0] * invFxZ;
@@ -252,22 +252,21 @@ WarpComputationResult FrameWarpCalculator::computeAllFramesWithRollingShutter(
 
     const bool useRS = rollingShutterCorrection && (std::fabs(profile.readoutTimeSec) > 1e-5) && (traj.frameTimestampsSec.size() == n);
 
-    // Step 2: Compute minimum safe zoom per frame across slice 0, mid, and 31
+    // Step 2: Compute minimum safe zoom per frame across slice 0, mid, and 63 (pure 3D gyro, no 2D zoom flicker)
     std::vector<double> zMin(n, 1.0);
     for (size_t i = 0; i < n; ++i) {
-        const auto shift = getShift(i);
         const Quat qCorrMid = (traj.rawFrameQuats[i].conjugate() * adjustedSmooth[i]).normalized();
         double zReq = computeRequiredZoom(
             qCorrMid, profile.width, profile.height,
-            profile.fx, profile.fy, profile.cx, profile.cy, 4.0, shift.first, shift.second
+            profile.fx, profile.fy, profile.cx, profile.cy, 4.0
         );
         if (useRS) {
             const Quat qTop = engine.sampleRawQuaternionAt(traj.frameTimestampsSec[i] - 0.5 * profile.readoutTimeSec);
             const Quat qBot = engine.sampleRawQuaternionAt(traj.frameTimestampsSec[i] + 0.5 * profile.readoutTimeSec);
             const Quat qCorrTop = (qTop.conjugate() * adjustedSmooth[i]).normalized();
             const Quat qCorrBot = (qBot.conjugate() * adjustedSmooth[i]).normalized();
-            zReq = std::max(zReq, computeRequiredZoom(qCorrTop, profile.width, profile.height, profile.fx, profile.fy, profile.cx, profile.cy, 4.0, shift.first, shift.second));
-            zReq = std::max(zReq, computeRequiredZoom(qCorrBot, profile.width, profile.height, profile.fx, profile.fy, profile.cx, profile.cy, 4.0, shift.first, shift.second));
+            zReq = std::max(zReq, computeRequiredZoom(qCorrTop, profile.width, profile.height, profile.fx, profile.fy, profile.cx, profile.cy, 4.0));
+            zReq = std::max(zReq, computeRequiredZoom(qCorrBot, profile.width, profile.height, profile.fx, profile.fy, profile.cx, profile.cy, 4.0));
         }
         zMin[i] = zReq;
     }
@@ -348,8 +347,80 @@ WarpComputationResult FrameWarpCalculator::computeAllFramesWithRollingShutter(
         ? std::min(1.0, std::max(0.0, fovScaleBoost))
         : 0.0;
 
+    // Step 4: Binary-search clamp 2D shifts inside existing crop margin (0% black borders, 0% zoom flicker)
+    std::vector<double> clampedShiftX(n, 0.0);
+    std::vector<double> clampedShiftY(n, 0.0);
+    if (hasResidual) {
+        const double maxU = static_cast<double>(profile.width - 1);
+        const double maxV = static_cast<double>(profile.height - 1);
+        std::array<std::pair<double, double>, 16> boundaryPts{};
+        int bIdx = 0;
+        for (int k = 0; k < 4; ++k) {
+            const double t = static_cast<double>(k) / 4.0;
+            boundaryPts[bIdx++] = {t * maxU, 0.0};
+            boundaryPts[bIdx++] = {maxU, t * maxV};
+            boundaryPts[bIdx++] = {(1.0 - t) * maxU, maxV};
+            boundaryPts[bIdx++] = {0.0, (1.0 - t) * maxV};
+        }
+
+        std::vector<double> scale2D(n, 1.0);
+        for (size_t i = 0; i < n; ++i) {
+            double zFinal = zSmooth[i];
+            if (maxZoomLimit > 1.0) zFinal = std::min(zFinal, maxZoomLimit);
+            if (boost > 0.0) zFinal = 1.0 + (1.0 - boost) * (zFinal - 1.0);
+
+            const auto rawShift = getShift(i);
+            if (std::hypot(rawShift.first, rawShift.second) < 1e-4) continue;
+
+            const Quat qCorrMid = (traj.rawFrameQuats[i].conjugate() * adjustedSmooth[i]).normalized();
+            const Quat qCorrTop = useRS ? (engine.sampleRawQuaternionAt(traj.frameTimestampsSec[i] - 0.5 * profile.readoutTimeSec).conjugate() * adjustedSmooth[i]).normalized() : qCorrMid;
+            const Quat qCorrBot = useRS ? (engine.sampleRawQuaternionAt(traj.frameTimestampsSec[i] + 0.5 * profile.readoutTimeSec).conjugate() * adjustedSmooth[i]).normalized() : qCorrMid;
+
+            auto fits2D = [&](double s) -> bool {
+                const double sx = s * rawShift.first;
+                const double sy = s * rawShift.second;
+                const Quat qList[3] = {qCorrMid, qCorrTop, qCorrBot};
+                const int qCount = useRS ? 3 : 1;
+                for (int qi = 0; qi < qCount; ++qi) {
+                    float H[9];
+                    computeInverseHomography(qList[qi], profile.fx, profile.fy, profile.cx, profile.cy, zFinal, H, sx, sy);
+                    for (const auto& pt : boundaryPts) {
+                        const double w = static_cast<double>(H[6]) * pt.first + static_cast<double>(H[7]) * pt.second + static_cast<double>(H[8]);
+                        if (w <= 0.25) return false;
+                        const double us = (static_cast<double>(H[0]) * pt.first + static_cast<double>(H[1]) * pt.second + static_cast<double>(H[2])) / w;
+                        const double vs = (static_cast<double>(H[3]) * pt.first + static_cast<double>(H[4]) * pt.second + static_cast<double>(H[5])) / w;
+                        if (us < 3.0 || us > maxU - 3.0 || vs < 3.0 || vs > maxV - 3.0) return false;
+                    }
+                }
+                return true;
+            };
+
+            if (!fits2D(1.0)) {
+                double lo = 0.0, hi = 1.0;
+                for (int iter = 0; iter < 10; ++iter) {
+                    const double mid = 0.5 * (lo + hi);
+                    if (fits2D(mid)) lo = mid; else hi = mid;
+                }
+                scale2D[i] = lo;
+            }
+        }
+
+        // Light 3-tap smooth strictly <= raw scale2D[i]
+        for (size_t i = 0; i < n; ++i) {
+            double sEff = scale2D[i];
+            if (i > 0 && i + 1 < n) {
+                sEff = std::min(scale2D[i], 0.25 * scale2D[i - 1] + 0.50 * scale2D[i] + 0.25 * scale2D[i + 1]);
+            }
+            const auto rawShift = getShift(i);
+            clampedShiftX[i] = sEff * rawShift.first;
+            clampedShiftY[i] = sEff * rawShift.second;
+        }
+    }
+
     for (size_t i = 0; i < n; ++i) {
-        const auto shift = getShift(i);
+        const std::pair<double, double> shift = hasResidual
+            ? std::make_pair(clampedShiftX[i], clampedShiftY[i])
+            : std::make_pair(0.0, 0.0);
         double zFinal = zSmooth[i];
         if (maxZoomLimit > 1.0) {
             zFinal = std::min(zFinal, maxZoomLimit);

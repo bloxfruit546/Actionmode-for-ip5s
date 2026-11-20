@@ -12,6 +12,7 @@ add_library(gf_core STATIC
     CoreCPP/src/TrajectoryEngine.cpp
     CoreCPP/src/FrameWarpCalculator.cpp
     CoreCPP/src/OpticalSync.cpp
+    CoreCPP/src/TranslationalStabilizer2D.cpp
     CoreCPP/src/VirtualGyroEngine.cpp
 )
 

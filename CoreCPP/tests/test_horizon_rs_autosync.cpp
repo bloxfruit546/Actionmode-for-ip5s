@@ -2,6 +2,7 @@
 #include "OpticalSync.hpp"
 #include "SidecarIO.hpp"
 #include "TrajectoryEngine.hpp"
+#include "TranslationalStabilizer2D.hpp"
 #include "VirtualGyroEngine.hpp"
 
 #include <cassert>
@@ -1689,6 +1690,126 @@ void test720p60ActionPipeline() {
                 syncRes.bestNCC, traj.stabilityImprovementPct, warp.minZoom, warp.maxZoom);
 }
 
+void testPhaseBTranslational2DFootstepAndSign() {
+    const auto prof = gf::CalibrationProfile::defaultIPhone5s1080p30();
+    const int nFrames = 60; // 2.0s @ 30fps
+
+    // 3D +-4 deg wrist rotation + +-20 px @ 3 Hz vertical footstep bounce + moving foreground object
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.width = 1920;
+    hdr.height = 1080;
+    hdr.nominal_fps = 30.0;
+
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    const double rotAmp = 10.0 * (kPi / 180.0);
+    auto rollAt = [&](double t) -> double {
+        // 10 deg roll impulse at t=0.25s sets Fixed Crop zoom ~1.31x, then gentle +-3 deg wrist sway
+        return rotAmp * std::exp(-std::pow((t - 0.25) / 0.12, 2.0))
+             + (3.0 * kPi / 180.0) * std::sin(2.0 * kPi * 1.2 * t);
+    };
+    for (int i = 0; i < 180; ++i) {
+        const double t = i / 90.0;
+        const double dRoll = (rollAt(t + 1e-4) - rollAt(t - 1e-4)) / 2e-4;
+        gyro.push_back({t, 0.0, 0.0, -dRoll});
+        accel.push_back({t, 0.0f, -1.0f, 0.0f});
+    }
+
+    std::vector<gf::GFFrameRecord> scFrames;
+    for (int f = 0; f < nFrames; ++f) {
+        scFrames.push_back({static_cast<uint32_t>(f), f / 30.0, 0.005f, 100.0f, 0.88f, 0.0});
+    }
+
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel);
+    gf::StabilizerConfig cfg;
+    cfg.pitchSmoothness = 0.85;
+    cfg.yawSmoothness = 0.85;
+    cfg.rollSmoothness = 0.92;
+    cfg.horizonLockEnabled = true;
+
+    const auto traj = engine.solve(scFrames, cfg);
+    assert(traj.valid);
+
+    gf::TranslationalStabilizer2D trans2D;
+    trans2D.reset(prof, traj, 1.0);
+    assert(trans2D.rectWidth() == 160 && trans2D.rectHeight() == 90);
+
+    // Feed 640x360 frames (downsampled to 160x90 inside feedLumaFrame) with:
+    //   1) 3D +-10 deg roll rotation
+    //   2) +-12 px @ 3 Hz vertical footstep bounce (in 1080p coordinates)
+    //   3) Fast moving foreground object in bottom-right quadrant
+    const int sw = 640, sh = 360;
+    const double sScale = 3.0; // 1920/640 = 3
+    std::vector<uint8_t> lumaBuf(static_cast<size_t>(sw * sh), 0);
+    std::vector<double> trueBounce1080(nFrames, 0.0);
+
+    for (int f = 0; f < nFrames; ++f) {
+        const double t = f / 30.0;
+        const double bounceY = 12.0 * std::sin(2.0 * kPi * 3.0 * t);
+        trueBounce1080[f] = bounceY;
+        const double rollAng = rollAt(t);
+        const double cr = std::cos(rollAng), sr = std::sin(rollAng);
+
+        for (int y = 0; y < sh; ++y) {
+            for (int x = 0; x < sw; ++x) {
+                // Moving foreground distractor in bottom-right
+                if (x > 440 && y > 230) {
+                    const double fxObj = x - f * 5.0;
+                    const double fyObj = y - f * 3.0;
+                    const double v = 128.0 + 50.0 * std::sin(fxObj * 0.25 + fyObj * 0.25);
+                    lumaBuf[static_cast<size_t>(y * sw + x)] = static_cast<uint8_t>(std::max(0.0, std::min(255.0, v)));
+                    continue;
+                }
+                const double xc = (x - 320.0) * sScale;
+                const double yc = (y - 180.0) * sScale - bounceY;
+                const double wx = cr * xc - sr * yc;
+                const double wy = sr * xc + cr * yc;
+                const double val = 128.0
+                    + 35.0 * std::sin(wx * 0.015 + wy * 0.011)
+                    + 25.0 * std::cos(wx * 0.029 - wy * 0.023)
+                    + 20.0 * std::sin((wx * wx * 0.00004) + wy * 0.041);
+                lumaBuf[static_cast<size_t>(y * sw + x)] = static_cast<uint8_t>(std::max(0.0, std::min(255.0, val)));
+            }
+        }
+        trans2D.feedLumaFrame(static_cast<size_t>(f), lumaBuf.data(), sw, sh, sw);
+    }
+
+    const auto res2D = trans2D.finalize(30.0);
+    assert(res2D.valid);
+    assert(res2D.validFrameCount >= 50);
+
+    // Check actual pixel mapping at center of output (960, 540) at Zoom=1.25x (Fixed Crop)
+    const auto warp = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
+        engine, traj, prof, 30.0, 0.0, false, false, &res2D.shiftXBase, &res2D.shiftYBase
+    );
+    assert(warp.packets.size() == static_cast<size_t>(nFrames));
+
+    double maxResidualPx = 0.0;
+    for (int f = 15; f < 50; ++f) {
+        const float* H = warp.packets[f].m;
+        const double wC = H[6] * 960.0 + H[7] * 540.0 + H[8];
+        const double vsCenter = (H[3] * 960.0 + H[4] * 540.0 + H[5]) / wC;
+        const double residual = std::fabs(vsCenter - (540.0 + trueBounce1080[f]));
+        maxResidualPx = std::max(maxResidualPx, residual);
+
+        // Also verify 0% black borders across all 4 corners
+        const double corners[4][2] = {{0.0, 0.0}, {1919.0, 0.0}, {1919.0, 1079.0}, {0.0, 1079.0}};
+        for (const auto& c : corners) {
+            const double wVal = H[6] * c[0] + H[7] * c[1] + H[8];
+            const double us = (H[0] * c[0] + H[1] * c[1] + H[2]) / wVal;
+            const double vs = (H[3] * c[0] + H[4] * c[1] + H[5]) / wVal;
+            assert(us >= 0.0 && us <= 1919.0 && vs >= 0.0 && vs <= 1079.0);
+        }
+    }
+    assert(maxResidualPx < 3.0);
+
+    std::printf("Test Phase B 160x90 2D (3D+-10deg + 2D+-12px@3Hz + MovingObj -> valid=%zu/59, residual=%.2f px, Zoom=%.2fx, 0%% black border) PASSED.\n",
+                res2D.validFrameCount, maxResidualPx, warp.maxZoom);
+}
+
 } // namespace
 
 int main() {
@@ -1712,5 +1833,6 @@ int main() {
     testClassroomAntiPumpingAndStaticRollSettle();
     testPortraitIntrinsicsAndZeroZoomSpike();
     test720p60ActionPipeline();
+    testPhaseBTranslational2DFootstepAndSign();
     return 0;
 }

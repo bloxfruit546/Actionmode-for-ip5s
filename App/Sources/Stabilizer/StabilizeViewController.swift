@@ -122,6 +122,8 @@ final class StabilizeViewController: UIViewController {
 
     private let hybridResidualLabel = UILabel()
     private let hybridResidualSwitch = UISwitch()
+    private let trans2DStrengthLabel = UILabel()
+    private let trans2DStrengthSlider = UISlider()
 
     private let motoActionLabel = UILabel()
     private let motoActionSwitch = UISwitch()
@@ -289,7 +291,7 @@ final class StabilizeViewController: UIViewController {
     }
 
     private func configureControls() {
-        for lbl in [pitchLabel, yawLabel, rollLabel, zoomLabel, dynamicZoomLabel, horizonLabel, tiltLabel, rsLabel, hybridResidualLabel, motoActionLabel, framingLabel, sharpenLabel, exportBitrateLabel, offsetLabel] {
+        for lbl in [pitchLabel, yawLabel, rollLabel, zoomLabel, dynamicZoomLabel, horizonLabel, tiltLabel, rsLabel, hybridResidualLabel, trans2DStrengthLabel, motoActionLabel, framingLabel, sharpenLabel, exportBitrateLabel, offsetLabel] {
             lbl.translatesAutoresizingMaskIntoConstraints = false
             lbl.font = UIFont(name: "Menlo-Bold", size: 11) ?? UIFont.systemFont(ofSize: 11, weight: .bold)
             lbl.textColor = .white
@@ -300,6 +302,7 @@ final class StabilizeViewController: UIViewController {
         configureSlider(rollSlider, min: 0.0, max: 1.0, val: 0.75)
         configureSlider(zoomSlider, min: 1.05, max: 2.40, val: 1.95)
         configureSlider(tiltSlider, min: -15.0, max: 15.0, val: 0.0)
+        configureSlider(trans2DStrengthSlider, min: 0.0, max: 1.0, val: 0.85)
         configureSlider(sharpenSlider, min: 0.0, max: 1.0, val: 0.45)
         configureSlider(offsetSlider, min: -80.0, max: 80.0, val: 0.0)
 
@@ -394,6 +397,8 @@ final class StabilizeViewController: UIViewController {
             tiltSlider,
             rsRow,
             hybridRow,
+            trans2DStrengthLabel,
+            trans2DStrengthSlider,
             motoRow,
             finishingHeaderLabel,
             framingLabel,
@@ -480,6 +485,7 @@ final class StabilizeViewController: UIViewController {
             focalScaleOverride: detectedFocalScale,
             rollGyroScaleOverride: detectedRollGyroScale,
             hybridResidualEnabled: hybridResidualSwitch.isOn,
+            translational2DStrength: Double(trans2DStrengthSlider.value),
             motoActionMode: motoActionSwitch.isOn,
             edgeFillMode: edgeFillMode,
             fovScaleBoost: fovBoost,
@@ -583,7 +589,10 @@ final class StabilizeViewController: UIViewController {
         tiltSlider.alpha = horizonSwitch.isOn ? 1.0 : 0.4
 
         rsLabel.text = rsSwitch.isOn ? "Rolling Shutter Fix (64-Slice): ON" : "Rolling Shutter Fix: OFF"
-        hybridResidualLabel.text = hybridResidualSwitch.isOn ? "Hybrid Optical Residual Lock: ON" : "Hybrid Optical Residual Lock: OFF"
+        hybridResidualLabel.text = hybridResidualSwitch.isOn ? "2D Footstep Stabilizer (160x90): ON" : "2D Footstep Stabilizer (160x90): OFF"
+        trans2DStrengthLabel.text = String(format: "2D Footstep Strength: %.0f%%", trans2DStrengthSlider.value * 100.0)
+        trans2DStrengthSlider.isEnabled = hybridResidualSwitch.isOn && !motoActionSwitch.isOn
+        trans2DStrengthSlider.alpha = trans2DStrengthSlider.isEnabled ? 1.0 : 0.4
         motoActionLabel.text = motoActionSwitch.isOn ? "MotoPOV Action Mode (42Hz/Far-ROI): ON" : "MotoPOV Action Mode: OFF"
         let framingNames = ["Dynamic Safe Crop", "Temporal Full-Frame (1.00x)", "Mirror Border (1.00x)"]
         let fIdx = max(0, min(2, framingControl.selectedSegmentIndex))
@@ -699,6 +708,9 @@ final class StabilizeViewController: UIViewController {
         pipeline.render(
             take: take,
             config: cfg,
+            statusUpdate: { [weak self] msg in
+                self?.statusLabel.text = msg
+            },
             progress: { [weak self] frac, frameIdx, totalFrames, ramMB in
                 self?.progressView.progress = Float(frac)
                 self?.statusLabel.text = String(
@@ -720,10 +732,11 @@ final class StabilizeViewController: UIViewController {
                     self.setResultButtonsEnabled(true)
                     self.statusLabel.textColor = UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0)
                     self.statusLabel.text = String(
-                        format: "DONE! %d frames in %.1fs (%.1f fps)\nPeak RAM: %.1f MB | Gain: %.1f%%",
+                        format: "DONE! %d frames in %.1fs (%.1f fps)\nPeak RAM: %.1f MB | Gain: %.1f%% | 2D: %.1fpx (%lu ok)",
                         res.renderedFrames, res.elapsedSeconds,
                         Double(res.renderedFrames) / max(res.elapsedSeconds, 0.01),
-                        res.peakRamMB, res.plan.stabilityImprovementPct
+                        res.peakRamMB, res.plan.stabilityImprovementPct,
+                        res.plan.hybridResidualMaxPx, UInt(res.plan.translational2DValidFrames)
                     )
                 case .failure(let err):
                     self.statusLabel.textColor = UIColor(red: 1.0, green: 0.45, blue: 0.45, alpha: 1.0)

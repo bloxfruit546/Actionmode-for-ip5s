@@ -4,6 +4,7 @@
 #import "OpticalSync.hpp"
 #import "SidecarIO.hpp"
 #import "TrajectoryEngine.hpp"
+#import "TranslationalStabilizer2D.hpp"
 
 #import <Metal/Metal.h>
 #include <simd/simd.h>
@@ -168,7 +169,7 @@ struct GFHistSlot {
     gf::TrajectoryEngine _engine;
     gf::TrajectoryResult _traj;
     gf::StabilizerConfig _cfg;
-    gf::HybridResidualTracker _hybridTracker;
+    gf::TranslationalStabilizer2D _trans2D;
     double _fps;
     gf::EdgeFillMode _edgeFillMode;
     double _fovScaleBoost;
@@ -314,7 +315,6 @@ struct GFHistSlot {
                     ((edgeFillMode == 2) ? gf::EdgeFillMode::MirrorEdge : gf::EdgeFillMode::StandardCrop);
     _fovScaleBoost = std::min(1.0, std::max(0.0, fovScaleBoost));
     _sharpenStrength = std::min(1.0, std::max(0.0, sharpenStrength));
-    _hybridTracker.reset(_profile, _traj, _cfg.motoActionMode);
 
     const gf::WarpComputationResult warpRes = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
         _engine,
@@ -410,45 +410,32 @@ struct GFHistSlot {
     return self;
 }
 
-- (void)pushHybridResidualPixelBuffer:(CVPixelBufferRef)pixelBuffer timestampSec:(double)ts {
+- (void)resetTranslational2DWithStrength:(double)strength {
+    _trans2D.reset(_profile, _traj, strength);
+}
+
+- (void)feedTranslational2DFrameIndex:(NSUInteger)frameIndex pixelBuffer:(CVPixelBufferRef)pixelBuffer {
     if (!pixelBuffer) {
         return;
     }
     CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
-    const size_t srcW = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0);
-    const size_t srcH = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0);
-    const size_t stride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0);
+    const int srcW = (int)CVPixelBufferGetWidthOfPlane(pixelBuffer, 0);
+    const int srcH = (int)CVPixelBufferGetHeightOfPlane(pixelBuffer, 0);
+    const int stride = (int)CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0);
     const uint8_t *base = (const uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0);
-
     if (base && srcW >= 64 && srcH >= 64) {
-        const int ds = 4;
-        const int dstW = (int)(srcW / ds);
-        const int dstH = (int)(srcH / ds);
-        gf::OpticalFlowFrame f;
-        f.timestampSec = ts;
-        f.width = dstW;
-        f.height = dstH;
-        f.luma.resize((size_t)(dstW * dstH));
-
-        for (int y = 0; y < dstH; ++y) {
-            const uint8_t *srcRow = base + (size_t)(y * ds) * stride;
-            uint8_t *dstRow = f.luma.data() + (size_t)(y * dstW);
-            for (int x = 0; x < dstW; ++x) {
-                dstRow[x] = srcRow[x * ds];
-            }
-        }
-        _hybridTracker.pushFrame(f);
+        _trans2D.feedLumaFrame((size_t)frameIndex, base, srcW, srcH, stride);
     }
     CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
 }
 
-- (void)finalizeHybridResidual {
-    const gf::HybridResidualResult hr = _hybridTracker.finalize(_fps);
-    if (!hr.valid) {
+- (void)finalizeTranslational2D {
+    const gf::Translational2DResult tr = _trans2D.finalize(_fps);
+    if (!tr.valid) {
         return;
     }
-    _residualShiftX = hr.shiftX;
-    _residualShiftY = hr.shiftY;
+    _residualShiftX = tr.shiftXBase;
+    _residualShiftY = tr.shiftYBase;
     const gf::WarpComputationResult warpRes = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
         _engine,
         _traj,
@@ -467,7 +454,8 @@ struct GFHistSlot {
     _plan.minZoom = warpRes.minZoom;
     _plan.maxZoom = warpRes.maxZoom;
     _plan.avgZoom = warpRes.avgZoom;
-    _plan.hybridResidualMaxPx = hr.maxAmplitudePx;
+    _plan.hybridResidualMaxPx = tr.maxShiftPx;
+    _plan.translational2DValidFrames = tr.validFrameCount;
 }
 
 - (BOOL)warpPixelBuffer:(CVPixelBufferRef)srcPixelBuffer

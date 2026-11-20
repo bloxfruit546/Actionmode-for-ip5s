@@ -48,8 +48,8 @@ public:
         double cy,
         double zoom,
         float outH[9],
-        double cxVirtOffset = 0.0,
-        double cyVirtOffset = 0.0
+        double shiftXBase = 0.0,
+        double shiftYBase = 0.0
     );
 
     static double computeRequiredZoom(
@@ -61,8 +61,8 @@ public:
         double cx,
         double cy,
         double borderMarginPx = 4.0,
-        double cxVirtOffset = 0.0,
-        double cyVirtOffset = 0.0
+        double shiftXBase = 0.0,
+        double shiftYBase = 0.0
     );
 
     static WarpComputationResult computeAllFrames(

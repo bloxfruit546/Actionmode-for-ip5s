@@ -21,6 +21,7 @@ struct StabilizeExportConfig: Codable {
     let focalScaleOverride: Double
     let rollGyroScaleOverride: Double
     let hybridResidualEnabled: Bool
+    let translational2DStrength: Double
     let motoActionMode: Bool
     let edgeFillMode: Int
     let fovScaleBoost: Double
@@ -45,6 +46,7 @@ struct StabilizeExportConfig: Codable {
         focalScaleOverride: Double,
         rollGyroScaleOverride: Double = 1.0,
         hybridResidualEnabled: Bool = true,
+        translational2DStrength: Double = 0.85,
         motoActionMode: Bool = false,
         edgeFillMode: Int = 0,
         fovScaleBoost: Double = 1.0,
@@ -68,6 +70,7 @@ struct StabilizeExportConfig: Codable {
         self.focalScaleOverride = focalScaleOverride
         self.rollGyroScaleOverride = rollGyroScaleOverride
         self.hybridResidualEnabled = hybridResidualEnabled
+        self.translational2DStrength = translational2DStrength
         self.motoActionMode = motoActionMode
         self.edgeFillMode = edgeFillMode
         self.fovScaleBoost = fovScaleBoost
@@ -94,6 +97,7 @@ struct StabilizeExportConfig: Codable {
         focalScaleOverride = try c.decode(Double.self, forKey: .focalScaleOverride)
         rollGyroScaleOverride = (try? c.decodeIfPresent(Double.self, forKey: .rollGyroScaleOverride)) ?? 1.0
         hybridResidualEnabled = (try? c.decodeIfPresent(Bool.self, forKey: .hybridResidualEnabled)) ?? true
+        translational2DStrength = (try? c.decodeIfPresent(Double.self, forKey: .translational2DStrength)) ?? 0.85
         motoActionMode = (try? c.decodeIfPresent(Bool.self, forKey: .motoActionMode)) ?? false
         edgeFillMode = (try? c.decodeIfPresent(Int.self, forKey: .edgeFillMode)) ?? 0
         fovScaleBoost = (try? c.decodeIfPresent(Double.self, forKey: .fovScaleBoost)) ?? 1.0
@@ -227,6 +231,7 @@ final class OfflineRenderPipeline {
     func render(
         take: CaptureTake,
         config: StabilizeExportConfig,
+        statusUpdate: ((String) -> Void)? = nil,
         progress: @escaping (_ fraction: Double, _ frameIndex: Int, _ totalFrames: Int, _ ramMB: Double) -> Void,
         completion: @escaping (Result<StabilizeExportResult, Error>) -> Void
     ) {
@@ -259,8 +264,15 @@ final class OfflineRenderPipeline {
                 return
             }
 
-            if config.hybridResidualEnabled && !config.motoActionMode {
-                self.runHybridResidualPass(asset: asset, videoTrack: videoTrack, bridge: bridge)
+            if config.hybridResidualEnabled && !config.motoActionMode && config.translational2DStrength > 0.01 {
+                self.runTranslational2DPass(
+                    asset: asset,
+                    videoTrack: videoTrack,
+                    bridge: bridge,
+                    totalFrames: max(1, Int(plan.frameCount)),
+                    strength: config.translational2DStrength,
+                    statusUpdate: statusUpdate
+                )
             }
 
             let outURL = Self.stabilizedDirectory.appendingPathComponent("\(take.uuid)_stab.mov")
@@ -628,7 +640,14 @@ final class OfflineRenderPipeline {
         }
     }
 
-    private func runHybridResidualPass(asset: AVURLAsset, videoTrack: AVAssetTrack, bridge: GFStabilizerBridge) {
+    private func runTranslational2DPass(
+        asset: AVURLAsset,
+        videoTrack: AVAssetTrack,
+        bridge: GFStabilizerBridge,
+        totalFrames: Int,
+        strength: Double,
+        statusUpdate: ((String) -> Void)?
+    ) {
         guard let preReader = try? AVAssetReader(asset: asset) else { return }
         let settings: [String: Any] = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
@@ -639,6 +658,10 @@ final class OfflineRenderPipeline {
         preReader.add(out)
         guard preReader.startReading() else { return }
 
+        bridge.resetTranslational2D(withStrength: strength)
+        var frameIdx: UInt = 0
+        var lastPct = -1
+
         while !isCancelled {
             var done = false
             autoreleasepool {
@@ -647,16 +670,27 @@ final class OfflineRenderPipeline {
                     return
                 }
                 if let pb = CMSampleBufferGetImageBuffer(sample) {
-                    let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
-                    bridge.pushHybridResidualPixelBuffer(pb, timestampSec: pts)
+                    bridge.feedTranslational2DFrameIndex(frameIdx, pixelBuffer: pb)
+                    frameIdx += 1
+                    let pct = min(100, Int((Double(frameIdx) / Double(max(1, totalFrames))) * 100.0))
+                    if pct != lastPct && (pct % 5 == 0 || pct == 100) {
+                        lastPct = pct
+                        DispatchQueue.main.async {
+                            statusUpdate?("Analyzing 2D Footstep Motion: \(pct)%")
+                        }
+                    }
                 }
             }
             if done { break }
         }
         preReader.cancelReading()
         if !isCancelled {
-            bridge.finalizeHybridResidual()
-            FileLogger.shared.log(String(format: "HybridResidual: MaxShift=%.1f px | SafeZoom=[%.2fx..%.2fx]", bridge.plan.hybridResidualMaxPx, bridge.plan.minZoom, bridge.plan.maxZoom))
+            bridge.finalizeTranslational2D()
+            FileLogger.shared.log(String(
+                format: "Translational2D (160x90): Valid=%lu/%d | MaxShift=%.1f px | SafeZoom=[%.2fx..%.2fx]",
+                bridge.plan.translational2DValidFrames, totalFrames, bridge.plan.hybridResidualMaxPx,
+                bridge.plan.minZoom, bridge.plan.maxZoom
+            ))
         }
     }
 
