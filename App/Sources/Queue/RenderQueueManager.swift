@@ -182,7 +182,7 @@ final class RenderQueueManager {
                     self.jobs[jIdx].completedFrames = res.renderedFrames
                     self.jobs[jIdx].totalFrames = res.renderedFrames
                     self.jobs[jIdx].outputFileName = res.outputURL.lastPathComponent
-                    OfflineRenderPipeline.saveVideoToPhotos(url: res.outputURL) { _ in }
+                    OfflineRenderPipeline.saveVideoToPhotos(url: res.outputURL, from: nil) { (_: Result<Void, Error>) in }
                 case .failure(let err):
                     if self.jobs[jIdx].status != .paused {
                         self.jobs[jIdx].status = .failed

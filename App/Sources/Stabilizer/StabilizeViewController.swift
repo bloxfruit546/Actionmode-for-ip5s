@@ -865,7 +865,7 @@ final class StabilizeViewController: UIViewController {
     @objc private func handleSavePhotos() {
         guard let url = lastExportedURL else { return }
         savePhotosButton.isEnabled = false
-        OfflineRenderPipeline.saveVideoToPhotos(url: url, from: self) { [weak self] result in
+        OfflineRenderPipeline.saveVideoToPhotos(url: url, from: self) { [weak self] (result: Result<Void, Error>) in
             guard let self = self else { return }
             self.savePhotosButton.isEnabled = true
             switch result {

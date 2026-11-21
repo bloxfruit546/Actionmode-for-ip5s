@@ -2,6 +2,7 @@ import AVFoundation
 import CoreVideo
 import Foundation
 import Photos
+import UIKit
 
 struct StabilizeExportConfig: Codable {
     let pitchSmoothness: Double
@@ -315,10 +316,9 @@ final class OfflineRenderPipeline {
                 // Safe metadata filtering: only keep creation date & location, skip internal QuickTime tags that conflict with assetsd
                 var safeMetadata: [AVMetadataItem] = []
                 for item in asset.commonMetadata {
-                    if let key = item.commonKey?.rawValue {
-                        if key == AVMetadataKey.commonIdentifierCreationDate.rawValue || key == AVMetadataKey.commonIdentifierLocation.rawValue {
-                            safeMetadata.append(item)
-                        }
+                    if let commonKey = item.commonKey,
+                       commonKey == .commonKeyCreationDate || commonKey == .commonKeyLocation {
+                        safeMetadata.append(item)
                     }
                 }
                 if !safeMetadata.isEmpty {

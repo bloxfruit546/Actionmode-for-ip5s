@@ -67,7 +67,7 @@ final class PhotosSaver: NSObject {
                 completion(.failure(err))
             }
 
-        @unknown default:
+        default:
             performTier1Save(videoURL: videoURL, from: viewController, completion: completion)
         }
     }
