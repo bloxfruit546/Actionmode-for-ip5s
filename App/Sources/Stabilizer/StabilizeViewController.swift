@@ -47,6 +47,17 @@ final class StabilizeViewController: UIViewController {
         return btn
     }()
 
+    private let heavyJoltPresetButton: UIButton = {
+        let btn = UIButton(type: .system)
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        btn.setTitle("🥊 HEAVY JOLT (MAX DAMPING)", for: .normal)
+        btn.setTitleColor(.white, for: .normal)
+        btn.titleLabel?.font = UIFont.systemFont(ofSize: 13, weight: .heavy)
+        btn.backgroundColor = UIColor(red: 0.85, green: 0.18, blue: 0.42, alpha: 1.0)
+        btn.layer.cornerRadius = 8
+        return btn
+    }()
+
     private let naturalPresetButton: UIButton = {
         let btn = UIButton(type: .system)
         btn.translatesAutoresizingMaskIntoConstraints = false
@@ -123,6 +134,16 @@ final class StabilizeViewController: UIViewController {
         return sc
     }()
 
+    private let cropTipLabel: UILabel = {
+        let l = UILabel()
+        l.translatesAutoresizingMaskIntoConstraints = false
+        l.font = UIFont(name: "Menlo", size: 10) ?? UIFont.systemFont(ofSize: 10)
+        l.textColor = UIColor(red: 1.0, green: 0.82, blue: 0.35, alpha: 1.0)
+        l.numberOfLines = 0
+        l.text = "Tip: Increase Crop (1.45x–1.60x) to absorb large-amplitude jolts completely."
+        return l
+    }()
+
     private let horizonLabel = UILabel()
     private let horizonModeControl: UISegmentedControl = {
         let sc = UISegmentedControl(items: ["Off (Smooth)", "Action Level (±40°)", "360° Lock"])
@@ -165,7 +186,7 @@ final class StabilizeViewController: UIViewController {
     private let sharpenSlider = UISlider()
     private let exportBitrateLabel = UILabel()
     private let exportBitrateControl: UISegmentedControl = {
-        let sc = UISegmentedControl(items: ["35M", "45M", "60M"])
+        let sc = UISegmentedControl(items: ["25M", "35M", "42M"])
         sc.translatesAutoresizingMaskIntoConstraints = false
         sc.selectedSegmentIndex = 1
         sc.tintColor = UIColor(red: 0.95, green: 0.65, blue: 0.20, alpha: 1.0)
@@ -350,6 +371,7 @@ final class StabilizeViewController: UIViewController {
 
         actionPresetButton.addTarget(self, action: #selector(handleActionModePreset), for: .touchUpInside)
         motoPresetButton.addTarget(self, action: #selector(handleMotoPovPreset), for: .touchUpInside)
+        heavyJoltPresetButton.addTarget(self, action: #selector(handleHeavyJoltPreset), for: .touchUpInside)
         naturalPresetButton.addTarget(self, action: #selector(handleNaturalPreset), for: .touchUpInside)
         ultraGimbalButton.addTarget(self, action: #selector(handleUltraGimbalPreset), for: .touchUpInside)
         steadicamPresetButton.addTarget(self, action: #selector(handleSteadicamPreset), for: .touchUpInside)
@@ -397,6 +419,7 @@ final class StabilizeViewController: UIViewController {
         let stack = UIStackView(arrangedSubviews: [
             actionPresetButton,
             motoPresetButton,
+            heavyJoltPresetButton,
             presetRow,
             autoSyncButton,
             autoSyncLabel,
@@ -410,6 +433,7 @@ final class StabilizeViewController: UIViewController {
             zoomSlider,
             dynamicZoomLabel,
             zoomModeControl,
+            cropTipLabel,
             horizonLabel,
             horizonModeControl,
             tiltLabel,
@@ -463,6 +487,7 @@ final class StabilizeViewController: UIViewController {
             stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -28),
 
             motoPresetButton.heightAnchor.constraint(equalToConstant: 42),
+            heavyJoltPresetButton.heightAnchor.constraint(equalToConstant: 42),
             naturalPresetButton.heightAnchor.constraint(equalToConstant: 40),
             ultraGimbalButton.heightAnchor.constraint(equalToConstant: 40),
             steadicamPresetButton.heightAnchor.constraint(equalToConstant: 40),
@@ -482,9 +507,9 @@ final class StabilizeViewController: UIViewController {
         let fovBoost = (edgeFillMode == 0) ? 0.0 : 1.0
         let bitrateMbps: Int
         switch exportBitrateControl.selectedSegmentIndex {
-        case 0: bitrateMbps = 35
-        case 2: bitrateMbps = 60
-        default: bitrateMbps = 45
+        case 0: bitrateMbps = 25
+        case 2: bitrateMbps = 42
+        default: bitrateMbps = 35
         }
         let hMode = horizonModeControl.selectedSegmentIndex
         let hEnabled = (hMode != 0)
@@ -555,6 +580,22 @@ final class StabilizeViewController: UIViewController {
         zoomSlider.value = 1.65
         rsSwitch.isOn = true
         zoomModeControl.selectedSegmentIndex = 1
+        updateSliderLabels()
+        handlePreview()
+    }
+
+    @objc private func handleHeavyJoltPreset() {
+        motoActionSwitch.isOn = false
+        pitchSlider.value = 0.92
+        yawSlider.value = 0.92
+        rollSlider.value = 0.95
+        horizonModeControl.selectedSegmentIndex = 1
+        hybridResidualSwitch.isOn = false
+        trans2DStrengthSlider.value = 0.0
+        unlimitedZoomSwitch.isOn = false
+        zoomSlider.value = 1.52
+        rsSwitch.isOn = true
+        zoomModeControl.selectedSegmentIndex = 0
         updateSliderLabels()
         handlePreview()
     }
@@ -652,7 +693,7 @@ final class StabilizeViewController: UIViewController {
         let fIdx = max(0, min(2, framingControl.selectedSegmentIndex))
         framingLabel.text = "Framing: \(framingNames[fIdx])"
         sharpenLabel.text = String(format: "Adaptive Sharpening (CAS): %.0f%%", sharpenSlider.value * 100.0)
-        let tierNames = ["Standard High (35M CABAC)", "Cinema Pro (45M CABAC)", "Master Archive (60M CABAC)"]
+        let tierNames = ["Standard (25M CABAC)", "Cinema Pro (35M CABAC)", "Max A7 (42M Level 4.1)"]
         let bIdx = max(0, min(2, exportBitrateControl.selectedSegmentIndex))
         exportBitrateLabel.text = "Export Bitrate: \(tierNames[bIdx])"
         offsetLabel.text = String(format: "IMU Sync Offset: %+.1f ms", offsetSlider.value)
@@ -753,6 +794,8 @@ final class StabilizeViewController: UIViewController {
 
         isRendering = true
         lastExportedURL = nil
+        savePhotosButton.setTitle("SAVE TO PHOTOS", for: .normal)
+        savePhotosButton.backgroundColor = UIColor(red: 0.72, green: 0.42, blue: 0.12, alpha: 1.0)
         setResultButtonsEnabled(false)
         progressView.progress = 0.0
         renderButton.setTitle("CANCEL RENDER", for: .normal)
@@ -822,13 +865,22 @@ final class StabilizeViewController: UIViewController {
     @objc private func handleSavePhotos() {
         guard let url = lastExportedURL else { return }
         savePhotosButton.isEnabled = false
-        OfflineRenderPipeline.saveVideoToPhotos(url: url) { [weak self] result in
+        OfflineRenderPipeline.saveVideoToPhotos(url: url, from: self) { [weak self] result in
             guard let self = self else { return }
             self.savePhotosButton.isEnabled = true
             switch result {
             case .success:
+                self.savePhotosButton.setTitle("✓ SAVED TO PHOTOS", for: .normal)
+                self.savePhotosButton.backgroundColor = UIColor(red: 0.18, green: 0.68, blue: 0.38, alpha: 1.0)
                 self.statusLabel.textColor = UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0)
                 self.statusLabel.text = "Saved stabilized video to Photos!"
+                let alert = UIAlertController(
+                    title: "Success",
+                    message: "Saved to Photos Successfully!",
+                    preferredStyle: .alert
+                )
+                alert.addAction(UIAlertAction(title: "OK", style: .default))
+                self.present(alert, animated: true)
             case .failure(let err):
                 self.statusLabel.textColor = UIColor(red: 1.0, green: 0.45, blue: 0.45, alpha: 1.0)
                 self.statusLabel.text = "Photos Save Error: \(err.localizedDescription)"

@@ -53,7 +53,7 @@ struct StabilizeExportConfig: Codable {
         edgeFillMode: Int = 0,
         fovScaleBoost: Double = 1.0,
         sharpenStrength: Double = 0.45,
-        exportBitrateMbps: Int = 45
+        exportBitrateMbps: Int = 35
     ) {
         self.pitchSmoothness = pitchSmoothness
         self.yawSmoothness = yawSmoothness
@@ -106,7 +106,7 @@ struct StabilizeExportConfig: Codable {
         edgeFillMode = (try? c.decodeIfPresent(Int.self, forKey: .edgeFillMode)) ?? 0
         fovScaleBoost = (try? c.decodeIfPresent(Double.self, forKey: .fovScaleBoost)) ?? 1.0
         sharpenStrength = (try? c.decodeIfPresent(Double.self, forKey: .sharpenStrength)) ?? 0.45
-        exportBitrateMbps = (try? c.decodeIfPresent(Int.self, forKey: .exportBitrateMbps)) ?? 45
+        exportBitrateMbps = (try? c.decodeIfPresent(Int.self, forKey: .exportBitrateMbps)) ?? 35
     }
 }
 
@@ -310,19 +310,28 @@ final class OfflineRenderPipeline {
                 }
 
                 let writer = try AVAssetWriter(outputURL: outURL, fileType: .mov)
-                writer.shouldOptimizeForNetworkUse = false
-                if !asset.metadata.isEmpty {
-                    writer.metadata = asset.metadata
-                } else if !asset.commonMetadata.isEmpty {
-                    writer.metadata = asset.commonMetadata
+                writer.shouldOptimizeForNetworkUse = true
+
+                // Safe metadata filtering: only keep creation date & location, skip internal QuickTime tags that conflict with assetsd
+                var safeMetadata: [AVMetadataItem] = []
+                for item in asset.commonMetadata {
+                    if let key = item.commonKey?.rawValue {
+                        if key == AVMetadataKey.commonIdentifierCreationDate.rawValue || key == AVMetadataKey.commonIdentifierLocation.rawValue {
+                            safeMetadata.append(item)
+                        }
+                    }
+                }
+                if !safeMetadata.isEmpty {
+                    writer.metadata = safeMetadata
                 }
 
-                let targetMbps = max(20, min(60, config.exportBitrateMbps > 0 ? config.exportBitrateMbps : ((height >= 1000) ? 45 : 35)))
+                // Apple A7 Hardware-compliant H.264 High Profile Level 4.1 for 100% Photos / assetsd compatibility
+                let targetMbps = max(20, min(42, config.exportBitrateMbps > 0 ? config.exportBitrateMbps : ((height >= 1000) ? 35 : 25)))
                 let bitrate = targetMbps * 1_000_000
                 let fpsInt = max(1, Int(round(plan.nominalFps > 1 ? plan.nominalFps : 30)))
                 let compressionProps: [String: Any] = [
                     AVVideoAverageBitRateKey: bitrate,
-                    AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
+                    AVVideoProfileLevelKey: AVVideoProfileLevelH264High41,
                     AVVideoH264EntropyModeKey: AVVideoH264EntropyModeCABAC,
                     AVVideoAllowFrameReorderingKey: true,
                     AVVideoMaxKeyFrameIntervalKey: max(1, fpsInt / 2),
@@ -613,35 +622,8 @@ final class OfflineRenderPipeline {
         }
     }
 
-    static func saveVideoToPhotos(url: URL, completion: @escaping (Result<Void, Error>) -> Void) {
-        PHPhotoLibrary.requestAuthorization { status in
-            guard status == .authorized else {
-                DispatchQueue.main.async {
-                    completion(.failure(NSError(
-                        domain: "GyroStabilizer5s",
-                        code: -2,
-                        userInfo: [NSLocalizedDescriptionKey: "Photo Library permission denied."]
-                    )))
-                }
-                return
-            }
-
-            PHPhotoLibrary.shared().performChanges({
-                PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
-            }) { success, error in
-                DispatchQueue.main.async {
-                    if success {
-                        completion(.success(()))
-                    } else {
-                        completion(.failure(error ?? NSError(
-                            domain: "GyroStabilizer5s",
-                            code: -3,
-                            userInfo: [NSLocalizedDescriptionKey: "Failed to save video to Photos."]
-                        )))
-                    }
-                }
-            }
-        }
+    static func saveVideoToPhotos(url: URL, from viewController: UIViewController? = nil, completion: @escaping (Result<Void, Error>) -> Void) {
+        PhotosSaver.shared.saveVideoToPhotos(videoURL: url, from: viewController, completion: completion)
     }
 
     private func runTranslational2DPass(

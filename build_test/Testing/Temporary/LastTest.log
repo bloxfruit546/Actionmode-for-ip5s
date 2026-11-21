@@ -1,10 +1,10 @@
-Start testing: Nov 21 14:54 SE Asia Standard Time
+Start testing: Nov 21 16:02 SE Asia Standard Time
 ----------------------------------------------------------
 1/5 Testing: gf_core_math_tests
 1/5 Test: gf_core_math_tests
 Command: "X:/GyroStabilizer5s/build_test/gf_core_tests.exe"
 Directory: X:/GyroStabilizer5s/build_test
-"gf_core_math_tests" start time: Nov 21 14:54 SE Asia Standard Time
+"gf_core_math_tests" start time: Nov 21 16:02 SE Asia Standard Time
 Output:
 ----------------------------------------------------------
 All CoreCPP math and sidecar tests passed.
@@ -12,7 +12,7 @@ All CoreCPP math and sidecar tests passed.
 Test time =   0.09 sec
 ----------------------------------------------------------
 Test Passed.
-"gf_core_math_tests" end time: Nov 21 14:54 SE Asia Standard Time
+"gf_core_math_tests" end time: Nov 21 16:02 SE Asia Standard Time
 "gf_core_math_tests" time elapsed: 00:00:00
 ----------------------------------------------------------
 
@@ -20,15 +20,15 @@ Test Passed.
 2/5 Test: gf_sidecar_calib_tests
 Command: "X:/GyroStabilizer5s/build_test/gf_sidecar_calib_tests.exe"
 Directory: X:/GyroStabilizer5s/build_test
-"gf_sidecar_calib_tests" start time: Nov 21 14:54 SE Asia Standard Time
+"gf_sidecar_calib_tests" start time: Nov 21 16:02 SE Asia Standard Time
 Output:
 ----------------------------------------------------------
 All CoreCPP SidecarIO and Calibration tests passed.
 <end of output>
-Test time =   0.18 sec
+Test time =   0.14 sec
 ----------------------------------------------------------
 Test Passed.
-"gf_sidecar_calib_tests" end time: Nov 21 14:54 SE Asia Standard Time
+"gf_sidecar_calib_tests" end time: Nov 21 16:02 SE Asia Standard Time
 "gf_sidecar_calib_tests" time elapsed: 00:00:00
 ----------------------------------------------------------
 
@@ -36,7 +36,7 @@ Test Passed.
 3/5 Test: gf_stabilizer_tests
 Command: "X:/GyroStabilizer5s/build_test/gf_stabilizer_tests.exe"
 Directory: X:/GyroStabilizer5s/build_test
-"gf_stabilizer_tests" start time: Nov 21 14:54 SE Asia Standard Time
+"gf_stabilizer_tests" start time: Nov 21 16:02 SE Asia Standard Time
 Output:
 ----------------------------------------------------------
 traj.stabilityImprovementPct = 99.50%, rawRms=4.0711, smoothRms=0.0121
@@ -46,10 +46,10 @@ testActionModeActionLevel40 (tilt +-25 deg -> rollErr=0.000 deg, zoom=1.28x) PAS
 testActionModeActionLevel40 (tilt 65 deg -> maxCorr=25.0 deg, zoom=1.35x) PASSED
 testSoftKneeMarginClampingZeroEdgeBounce (+-12 deg @ 1.25x -> 0% border violation, smooth decel) PASSED
 <end of output>
-Test time =   1.49 sec
+Test time =   1.62 sec
 ----------------------------------------------------------
 Test Passed.
-"gf_stabilizer_tests" end time: Nov 21 14:54 SE Asia Standard Time
+"gf_stabilizer_tests" end time: Nov 21 16:02 SE Asia Standard Time
 "gf_stabilizer_tests" time elapsed: 00:00:01
 ----------------------------------------------------------
 
@@ -57,7 +57,7 @@ Test Passed.
 4/5 Test: gf_horizon_rs_autosync_tests
 Command: "X:/GyroStabilizer5s/build_test/gf_horizon_rs_autosync_tests.exe"
 Directory: X:/GyroStabilizer5s/build_test
-"gf_horizon_rs_autosync_tests" start time: Nov 21 14:54 SE Asia Standard Time
+"gf_horizon_rs_autosync_tests" start time: Nov 21 16:02 SE Asia Standard Time
 Output:
 ----------------------------------------------------------
 Horizon/RS/AutoSync test passed: Auto-Sync: +17.4 ms | NCC: 0.991 | RS: +1.0 ms | Scale: 0.937x | Axis: LandscapeRight (+y,+x,-z)
@@ -84,10 +84,10 @@ Test Phase 7.2 v1.2.0 (ZoomPeak=1.513x -> +125ms=1.513x, +1.0s=1.488x | Portrait
 Test Phase A 720p60 (90Hz IMU / 60fps Video -> NCC=0.981, Gain=99.50%, Zoom=[1.17x..1.25x], 0% black border) PASSED.
 Test Phase B 160x90 2D (3D+-10deg + 2D+-12px@3Hz + MovingObj -> valid=59/59, residual=1.67 px, Zoom=1.40x, 0% black border) PASSED.
 <end of output>
-Test time =  17.48 sec
+Test time =  17.98 sec
 ----------------------------------------------------------
 Test Passed.
-"gf_horizon_rs_autosync_tests" end time: Nov 21 14:54 SE Asia Standard Time
+"gf_horizon_rs_autosync_tests" end time: Nov 21 16:02 SE Asia Standard Time
 "gf_horizon_rs_autosync_tests" time elapsed: 00:00:17
 ----------------------------------------------------------
 
@@ -95,7 +95,7 @@ Test Passed.
 5/5 Test: gf_quality_metrics_tests
 Command: "X:/GyroStabilizer5s/build_test/gf_quality_metrics_tests.exe"
 Directory: X:/GyroStabilizer5s/build_test
-"gf_quality_metrics_tests" start time: Nov 21 14:54 SE Asia Standard Time
+"gf_quality_metrics_tests" start time: Nov 21 16:02 SE Asia Standard Time
 Output:
 ----------------------------------------------------------
 Quality Test 1 (Identity PSNR=57.94 dB, SSIM=0.99994 | +12.5deg Single-Pass PSNR=58.99 dB, SSIM=0.9999) PASSED.
@@ -108,11 +108,11 @@ Quality Test 2 (Temporal Edge Fill @ Zoom=1.00x -> 18560 border px filled, 0 bla
   Single-Pass Resampling:     PSNR=58.99 dB | SSIM=0.9999
 =======================================================
 <end of output>
-Test time =   3.81 sec
+Test time =   3.36 sec
 ----------------------------------------------------------
 Test Passed.
-"gf_quality_metrics_tests" end time: Nov 21 14:54 SE Asia Standard Time
+"gf_quality_metrics_tests" end time: Nov 21 16:03 SE Asia Standard Time
 "gf_quality_metrics_tests" time elapsed: 00:00:03
 ----------------------------------------------------------
 
-End testing: Nov 21 14:54 SE Asia Standard Time
+End testing: Nov 21 16:03 SE Asia Standard Time
