@@ -59,6 +59,7 @@ NS_ASSUME_NONNULL_BEGIN
                           horizonLockEnabled:(BOOL)horizonLockEnabled
                            horizonLockAmount:(double)horizonLockAmount
                         horizonTiltOffsetDeg:(double)horizonTiltOffsetDeg
+                                 horizonMode:(NSInteger)horizonMode
                     rollingShutterCorrection:(BOOL)rollingShutterCorrection
                           dynamicZoomEnabled:(BOOL)dynamicZoomEnabled
                              axisPresetIndex:(NSInteger)axisPresetIndex

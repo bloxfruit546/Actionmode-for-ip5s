@@ -210,6 +210,7 @@ struct GFHistSlot {
                           horizonLockEnabled:(BOOL)horizonLockEnabled
                            horizonLockAmount:(double)horizonLockAmount
                         horizonTiltOffsetDeg:(double)horizonTiltOffsetDeg
+                                 horizonMode:(NSInteger)horizonMode
                     rollingShutterCorrection:(BOOL)rollingShutterCorrection
                           dynamicZoomEnabled:(BOOL)dynamicZoomEnabled
                              axisPresetIndex:(NSInteger)axisPresetIndex
@@ -260,6 +261,8 @@ struct GFHistSlot {
     _cfg.horizonLockEnabled = horizonLockEnabled ? true : false;
     _cfg.horizonLockAmount = horizonLockAmount;
     _cfg.horizonTiltOffsetDeg = horizonTiltOffsetDeg;
+    _cfg.horizonMode = (horizonMode == 1) ? gf::HorizonMode::ActionLevel40 :
+                       ((horizonMode == 2) ? gf::HorizonMode::Full360Lock : gf::HorizonMode::Off);
     _cfg.rollingShutterCorrection = rollingShutterCorrection ? true : false;
     _cfg.dynamicZoomEnabled = dynamicZoomEnabled ? true : false;
     _cfg.motoActionMode = motoActionMode ? true : false;

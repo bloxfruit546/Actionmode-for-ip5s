@@ -423,8 +423,8 @@ void testEndToEndPixelStabilizationCentroid() {
     const double expCy = (fy * zUsed) * (pVirt.y / pVirt.z) + cy;
 
     const double errPx = std::hypot(outCx - expCx, outCy - expCy);
-    std::printf("Centroid debug: src=(%.2f, %.2f) out=(%.2f, %.2f) exp=(%.2f, %.2f) err=%.3f px\n",
-                uTarget, vTarget, outCx, outCy, expCx, expCy, errPx);
+    std::printf("Centroid debug: src=(%.2f, %.2f) out=(%.2f, %.2f) exp=(%.2f, %.2f) err=%.3f px, stability=%.2f%%\n",
+                uTarget, vTarget, outCx, outCy, expCx, expCy, errPx, traj.stabilityImprovementPct);
     std::fflush(stdout);
     assert(traj.stabilityImprovementPct > 90.0);
     assert(errPx < 0.5);
@@ -1303,6 +1303,8 @@ void testMotoCorneringCentripetalHorizonLock() {
             maxTrueRollErrDeg = std::max(maxTrueRollErrDeg, errDeg);
         }
     }
+    std::printf("Test Moto 1 maxTrueRollErrDeg = %.4f deg\n", maxTrueRollErrDeg);
+    std::fflush(stdout);
     assert(maxTrueRollErrDeg < 0.50);
 
     // Verify Yaw smoothly followed the ~90 deg turn by t=8.5s (frame 255)

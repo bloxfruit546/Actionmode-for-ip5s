@@ -25,6 +25,17 @@ final class StabilizeViewController: UIViewController {
         return v
     }()
 
+    private let actionPresetButton: UIButton = {
+        let btn = UIButton(type: .system)
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        btn.setTitle("⚡ ACTION MODE (RECOMMENDED)", for: .normal)
+        btn.setTitleColor(.black, for: .normal)
+        btn.titleLabel?.font = UIFont.systemFont(ofSize: 13, weight: .heavy)
+        btn.backgroundColor = UIColor(red: 0.20, green: 0.90, blue: 0.70, alpha: 1.0)
+        btn.layer.cornerRadius = 8
+        return btn
+    }()
+
     private let motoPresetButton: UIButton = {
         let btn = UIButton(type: .system)
         btn.translatesAutoresizingMaskIntoConstraints = false
@@ -113,7 +124,13 @@ final class StabilizeViewController: UIViewController {
     }()
 
     private let horizonLabel = UILabel()
-    private let horizonSwitch = UISwitch()
+    private let horizonModeControl: UISegmentedControl = {
+        let sc = UISegmentedControl(items: ["Off (Smooth)", "Action Level (±40°)", "360° Lock"])
+        sc.translatesAutoresizingMaskIntoConstraints = false
+        sc.selectedSegmentIndex = 1
+        sc.tintColor = UIColor(red: 0.20, green: 0.90, blue: 0.70, alpha: 1.0)
+        return sc
+    }()
     private let tiltLabel = UILabel()
     private let tiltSlider = UISlider()
 
@@ -297,12 +314,12 @@ final class StabilizeViewController: UIViewController {
             lbl.textColor = .white
         }
 
-        configureSlider(pitchSlider, min: 0.0, max: 1.0, val: 0.65)
-        configureSlider(yawSlider, min: 0.0, max: 1.0, val: 0.65)
-        configureSlider(rollSlider, min: 0.0, max: 1.0, val: 0.75)
-        configureSlider(zoomSlider, min: 1.05, max: 2.40, val: 1.95)
+        configureSlider(pitchSlider, min: 0.0, max: 1.0, val: 0.78)
+        configureSlider(yawSlider, min: 0.0, max: 1.0, val: 0.78)
+        configureSlider(rollSlider, min: 0.0, max: 1.0, val: 0.85)
+        configureSlider(zoomSlider, min: 1.05, max: 2.40, val: 1.28)
         configureSlider(tiltSlider, min: -15.0, max: 15.0, val: 0.0)
-        configureSlider(trans2DStrengthSlider, min: 0.0, max: 1.0, val: 0.85)
+        configureSlider(trans2DStrengthSlider, min: 0.0, max: 1.0, val: 0.0)
         configureSlider(sharpenSlider, min: 0.0, max: 1.0, val: 0.45)
         configureSlider(offsetSlider, min: -80.0, max: 80.0, val: 0.0)
 
@@ -310,27 +327,28 @@ final class StabilizeViewController: UIViewController {
         exportBitrateControl.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
 
         unlimitedZoomSwitch.translatesAutoresizingMaskIntoConstraints = false
-        unlimitedZoomSwitch.isOn = true
+        unlimitedZoomSwitch.isOn = false
         unlimitedZoomSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
 
         zoomModeControl.addTarget(self, action: #selector(handleFramingChanged), for: .valueChanged)
+        zoomModeControl.selectedSegmentIndex = 0
 
-        horizonSwitch.translatesAutoresizingMaskIntoConstraints = false
-        horizonSwitch.isOn = true
-        horizonSwitch.addTarget(self, action: #selector(handleHorizonToggled), for: .valueChanged)
+        horizonModeControl.addTarget(self, action: #selector(handleHorizonModeChanged), for: .valueChanged)
+        horizonModeControl.selectedSegmentIndex = 1
 
         rsSwitch.translatesAutoresizingMaskIntoConstraints = false
         rsSwitch.isOn = true
         rsSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
 
         hybridResidualSwitch.translatesAutoresizingMaskIntoConstraints = false
-        hybridResidualSwitch.isOn = true
+        hybridResidualSwitch.isOn = false
         hybridResidualSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
 
         motoActionSwitch.translatesAutoresizingMaskIntoConstraints = false
         motoActionSwitch.isOn = false
         motoActionSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
 
+        actionPresetButton.addTarget(self, action: #selector(handleActionModePreset), for: .touchUpInside)
         motoPresetButton.addTarget(self, action: #selector(handleMotoPovPreset), for: .touchUpInside)
         naturalPresetButton.addTarget(self, action: #selector(handleNaturalPreset), for: .touchUpInside)
         ultraGimbalButton.addTarget(self, action: #selector(handleUltraGimbalPreset), for: .touchUpInside)
@@ -372,12 +390,12 @@ final class StabilizeViewController: UIViewController {
         presetRow.distribution = .fillEqually
 
         let zoomRow = makeSwitchRow(zoomLabel, unlimitedZoomSwitch)
-        let horizonRow = makeSwitchRow(horizonLabel, horizonSwitch)
         let rsRow = makeSwitchRow(rsLabel, rsSwitch)
         let hybridRow = makeSwitchRow(hybridResidualLabel, hybridResidualSwitch)
         let motoRow = makeSwitchRow(motoActionLabel, motoActionSwitch)
 
         let stack = UIStackView(arrangedSubviews: [
+            actionPresetButton,
             motoPresetButton,
             presetRow,
             autoSyncButton,
@@ -392,7 +410,8 @@ final class StabilizeViewController: UIViewController {
             zoomSlider,
             dynamicZoomLabel,
             zoomModeControl,
-            horizonRow,
+            horizonLabel,
+            horizonModeControl,
             tiltLabel,
             tiltSlider,
             rsRow,
@@ -467,6 +486,8 @@ final class StabilizeViewController: UIViewController {
         case 2: bitrateMbps = 60
         default: bitrateMbps = 45
         }
+        let hMode = horizonModeControl.selectedSegmentIndex
+        let hEnabled = (hMode != 0)
         return StabilizeExportConfig(
             pitchSmoothness: Double(pitchSlider.value),
             yawSmoothness: Double(yawSlider.value),
@@ -474,9 +495,10 @@ final class StabilizeViewController: UIViewController {
             velocityDamping: 1.0,
             timeOffsetMs: Double(offsetSlider.value),
             maxZoomLimit: maxZoom,
-            horizonLockEnabled: horizonSwitch.isOn,
+            horizonLockEnabled: hEnabled,
             horizonLockAmount: 1.0,
             horizonTiltOffsetDeg: Double(tiltSlider.value),
+            horizonMode: hMode,
             rollingShutterCorrection: rsSwitch.isOn,
             dynamicZoomEnabled: zoomModeControl.selectedSegmentIndex == 1,
             axisPresetIndex: detectedAxisPresetIndex,
@@ -505,13 +527,30 @@ final class StabilizeViewController: UIViewController {
         present(alert, animated: true)
     }
 
+    @objc private func handleActionModePreset() {
+        motoActionSwitch.isOn = false
+        pitchSlider.value = 0.78
+        yawSlider.value = 0.78
+        rollSlider.value = 0.85
+        horizonModeControl.selectedSegmentIndex = 1
+        hybridResidualSwitch.isOn = false
+        trans2DStrengthSlider.value = 0.0
+        unlimitedZoomSwitch.isOn = false
+        zoomSlider.value = 1.28
+        rsSwitch.isOn = true
+        zoomModeControl.selectedSegmentIndex = 0
+        updateSliderLabels()
+        handlePreview()
+    }
+
     @objc private func handleMotoPovPreset() {
         motoActionSwitch.isOn = true
         pitchSlider.value = 0.94
         yawSlider.value = 0.72
         rollSlider.value = 0.98
-        horizonSwitch.isOn = true
+        horizonModeControl.selectedSegmentIndex = 2
         hybridResidualSwitch.isOn = false
+        trans2DStrengthSlider.value = 0.0
         unlimitedZoomSwitch.isOn = false
         zoomSlider.value = 1.65
         rsSwitch.isOn = true
@@ -525,8 +564,9 @@ final class StabilizeViewController: UIViewController {
         pitchSlider.value = 0.55
         yawSlider.value = 0.55
         rollSlider.value = 0.65
-        horizonSwitch.isOn = false
-        hybridResidualSwitch.isOn = true
+        horizonModeControl.selectedSegmentIndex = 0
+        hybridResidualSwitch.isOn = false
+        trans2DStrengthSlider.value = 0.0
         unlimitedZoomSwitch.isOn = false
         zoomSlider.value = 1.15
         rsSwitch.isOn = true
@@ -540,8 +580,9 @@ final class StabilizeViewController: UIViewController {
         pitchSlider.value = 0.85
         yawSlider.value = 0.85
         rollSlider.value = 0.92
-        horizonSwitch.isOn = true
-        hybridResidualSwitch.isOn = true
+        horizonModeControl.selectedSegmentIndex = 2
+        hybridResidualSwitch.isOn = false
+        trans2DStrengthSlider.value = 0.0
         unlimitedZoomSwitch.isOn = true
         zoomSlider.value = 2.00
         rsSwitch.isOn = true
@@ -555,8 +596,9 @@ final class StabilizeViewController: UIViewController {
         pitchSlider.value = 0.96
         yawSlider.value = 0.96
         rollSlider.value = 0.98
-        horizonSwitch.isOn = true
-        hybridResidualSwitch.isOn = true
+        horizonModeControl.selectedSegmentIndex = 2
+        hybridResidualSwitch.isOn = false
+        trans2DStrengthSlider.value = 0.0
         unlimitedZoomSwitch.isOn = false
         zoomSlider.value = 2.20
         rsSwitch.isOn = true
@@ -583,14 +625,26 @@ final class StabilizeViewController: UIViewController {
         dynamicZoomLabel.text = (zoomModeControl.selectedSegmentIndex == 0)
             ? "Zoom Mode: FIXED CROP (0% Breathing)"
             : "Zoom Mode: SMOOTH DYNAMIC (Peak-Hold)"
-        horizonLabel.text = horizonSwitch.isOn ? "360° Horizon Lock: ON" : "360° Horizon Lock: OFF"
+
+        switch horizonModeControl.selectedSegmentIndex {
+        case 0:
+            horizonLabel.text = "Horizon Mode: OFF (Smooth Roll)"
+            tiltSlider.isEnabled = false
+            tiltSlider.alpha = 0.4
+        case 1:
+            horizonLabel.text = "Horizon Mode: ACTION LEVEL (±40° Level / Soft-Knee)"
+            tiltSlider.isEnabled = true
+            tiltSlider.alpha = 1.0
+        default:
+            horizonLabel.text = "Horizon Mode: 360° FULL HORIZON LOCK"
+            tiltSlider.isEnabled = true
+            tiltSlider.alpha = 1.0
+        }
         tiltLabel.text = String(format: "Horizon Tilt: %+.1f deg", tiltSlider.value)
-        tiltSlider.isEnabled = horizonSwitch.isOn
-        tiltSlider.alpha = horizonSwitch.isOn ? 1.0 : 0.4
 
         rsLabel.text = rsSwitch.isOn ? "Rolling Shutter Fix (64-Slice): ON" : "Rolling Shutter Fix: OFF"
-        hybridResidualLabel.text = hybridResidualSwitch.isOn ? "2D Footstep Stabilizer (160x90): ON" : "2D Footstep Stabilizer (160x90): OFF"
-        trans2DStrengthLabel.text = String(format: "2D Footstep Strength: %.0f%%", trans2DStrengthSlider.value * 100.0)
+        hybridResidualLabel.text = hybridResidualSwitch.isOn ? "2D Footstep Polish (160x90): ON" : "2D Footstep Polish (160x90): OFF"
+        trans2DStrengthLabel.text = String(format: "2D Polish Strength: %.0f%%", trans2DStrengthSlider.value * 100.0)
         trans2DStrengthSlider.isEnabled = hybridResidualSwitch.isOn && !motoActionSwitch.isOn
         trans2DStrengthSlider.alpha = trans2DStrengthSlider.isEnabled ? 1.0 : 0.4
         motoActionLabel.text = motoActionSwitch.isOn ? "MotoPOV Action Mode (42Hz/Far-ROI): ON" : "MotoPOV Action Mode: OFF"
@@ -609,9 +663,11 @@ final class StabilizeViewController: UIViewController {
         handlePreview()
     }
 
-    @objc private func handleHorizonToggled() {
-        if horizonSwitch.isOn && zoomSlider.value < 1.65 {
+    @objc private func handleHorizonModeChanged() {
+        if horizonModeControl.selectedSegmentIndex == 2 && zoomSlider.value < 1.65 {
             zoomSlider.value = 1.65
+        } else if horizonModeControl.selectedSegmentIndex == 1 && zoomSlider.value < 1.25 {
+            zoomSlider.value = 1.28
         }
         updateSliderLabels()
         handlePreview()

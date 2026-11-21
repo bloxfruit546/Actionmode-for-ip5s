@@ -13,6 +13,7 @@ struct StabilizeExportConfig: Codable {
     let horizonLockEnabled: Bool
     let horizonLockAmount: Double
     let horizonTiltOffsetDeg: Double
+    let horizonMode: Int // 0: Off, 1: Action Level (±40°), 2: Full 360° Lock
     let rollingShutterCorrection: Bool
     let dynamicZoomEnabled: Bool
     let axisPresetIndex: Int
@@ -38,6 +39,7 @@ struct StabilizeExportConfig: Codable {
         horizonLockEnabled: Bool,
         horizonLockAmount: Double,
         horizonTiltOffsetDeg: Double,
+        horizonMode: Int = 1,
         rollingShutterCorrection: Bool,
         dynamicZoomEnabled: Bool,
         axisPresetIndex: Int,
@@ -45,8 +47,8 @@ struct StabilizeExportConfig: Codable {
         signedReadoutTimeMs: Double,
         focalScaleOverride: Double,
         rollGyroScaleOverride: Double = 1.0,
-        hybridResidualEnabled: Bool = true,
-        translational2DStrength: Double = 0.85,
+        hybridResidualEnabled: Bool = false,
+        translational2DStrength: Double = 0.0,
         motoActionMode: Bool = false,
         edgeFillMode: Int = 0,
         fovScaleBoost: Double = 1.0,
@@ -62,6 +64,7 @@ struct StabilizeExportConfig: Codable {
         self.horizonLockEnabled = horizonLockEnabled
         self.horizonLockAmount = horizonLockAmount
         self.horizonTiltOffsetDeg = horizonTiltOffsetDeg
+        self.horizonMode = horizonMode
         self.rollingShutterCorrection = rollingShutterCorrection
         self.dynamicZoomEnabled = dynamicZoomEnabled
         self.axisPresetIndex = axisPresetIndex
@@ -89,6 +92,7 @@ struct StabilizeExportConfig: Codable {
         horizonLockEnabled = try c.decode(Bool.self, forKey: .horizonLockEnabled)
         horizonLockAmount = try c.decode(Double.self, forKey: .horizonLockAmount)
         horizonTiltOffsetDeg = try c.decode(Double.self, forKey: .horizonTiltOffsetDeg)
+        horizonMode = (try? c.decodeIfPresent(Int.self, forKey: .horizonMode)) ?? 1
         rollingShutterCorrection = try c.decode(Bool.self, forKey: .rollingShutterCorrection)
         dynamicZoomEnabled = try c.decode(Bool.self, forKey: .dynamicZoomEnabled)
         axisPresetIndex = try c.decode(Int.self, forKey: .axisPresetIndex)
@@ -96,8 +100,8 @@ struct StabilizeExportConfig: Codable {
         signedReadoutTimeMs = try c.decode(Double.self, forKey: .signedReadoutTimeMs)
         focalScaleOverride = try c.decode(Double.self, forKey: .focalScaleOverride)
         rollGyroScaleOverride = (try? c.decodeIfPresent(Double.self, forKey: .rollGyroScaleOverride)) ?? 1.0
-        hybridResidualEnabled = (try? c.decodeIfPresent(Bool.self, forKey: .hybridResidualEnabled)) ?? true
-        translational2DStrength = (try? c.decodeIfPresent(Double.self, forKey: .translational2DStrength)) ?? 0.85
+        hybridResidualEnabled = (try? c.decodeIfPresent(Bool.self, forKey: .hybridResidualEnabled)) ?? false
+        translational2DStrength = (try? c.decodeIfPresent(Double.self, forKey: .translational2DStrength)) ?? 0.0
         motoActionMode = (try? c.decodeIfPresent(Bool.self, forKey: .motoActionMode)) ?? false
         edgeFillMode = (try? c.decodeIfPresent(Int.self, forKey: .edgeFillMode)) ?? 0
         fovScaleBoost = (try? c.decodeIfPresent(Double.self, forKey: .fovScaleBoost)) ?? 1.0
@@ -706,6 +710,7 @@ final class OfflineRenderPipeline {
             horizonLockEnabled: config.horizonLockEnabled,
             horizonLockAmount: config.horizonLockAmount,
             horizonTiltOffsetDeg: config.horizonTiltOffsetDeg,
+            horizonMode: config.horizonMode,
             rollingShutterCorrection: config.rollingShutterCorrection,
             dynamicZoomEnabled: config.dynamicZoomEnabled,
             axisPresetIndex: config.axisPresetIndex,

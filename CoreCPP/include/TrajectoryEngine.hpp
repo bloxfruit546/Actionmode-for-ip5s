@@ -8,19 +8,26 @@
 
 namespace gf {
 
+enum class HorizonMode : int {
+    Off = 0,
+    ActionLevel40 = 1,  // ±40° Action Horizon Leveling (soft-knee release past ±35°)
+    Full360Lock = 2     // Full 360° gimbal lock
+};
+
 struct StabilizerConfig {
-    double smoothness = 0.65;        // Legacy fallback if per-axis not overridden
-    double pitchSmoothness = 0.65;   // [0.0, 1.0]
-    double yawSmoothness = 0.65;     // [0.0, 1.0]
-    double rollSmoothness = 0.75;    // [0.0, 1.0]
+    double smoothness = 0.78;        // Action Mode default
+    double pitchSmoothness = -1.0;   // < 0 means use smoothness
+    double yawSmoothness = -1.0;     // < 0 means use smoothness
+    double rollSmoothness = -1.0;    // < 0 means use smoothness
     double velocityDamping = 1.0;    // Reduces tau during intentional fast pans
     double timeOffsetMs = 0.0;       // Fine sync offset in [-80.0, +80.0] ms
-    double maxZoomLimit = 1.35;      // <= 1.0 disables cap (unlimited safe zoom)
-    bool horizonLockEnabled = false;
+    double maxZoomLimit = 0.0;       // <= 1.0 disables cap (unlimited safe zoom). Default 0.0
+    bool horizonLockEnabled = false; // Off by default in raw struct; enabled in UI/Presets
     double horizonLockAmount = 1.0;  // [0.0, 1.0]
     double horizonTiltOffsetDeg = 0.0;
+    HorizonMode horizonMode = HorizonMode::Full360Lock; // When horizonLockEnabled is true, defaults to Full 360 unless ActionLevel40 is set
     bool rollingShutterCorrection = true;
-    bool dynamicZoomEnabled = true;
+    bool dynamicZoomEnabled = true;  // Dynamic zoom by default in C++ core; Action Mode preset uses Fixed Crop
     bool motoActionMode = false;
     int videoRotationDegrees = 0;    // 0, 90, 180, 270 from AVAssetTrack.preferredTransform
     double axisMatrix[9] = {0, -1, 0, -1, 0, 0, 0, 0, -1};

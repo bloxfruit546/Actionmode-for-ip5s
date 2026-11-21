@@ -21,7 +21,7 @@ struct Translational2DResult {
 /// Measures and removes 1.5-4 Hz footstep bounce and near-field parallax after 3D gyro rectification.
 class TranslationalStabilizer2D {
 public:
-    void reset(const CalibrationProfile& profile, const TrajectoryResult& traj, double strength = 0.85);
+    void reset(const CalibrationProfile& profile, const TrajectoryResult& traj, double strength = 0.0);
 
     void feedLumaFrame(size_t frameIndex, const uint8_t* fullLuma, int srcW, int srcH, int srcStride);
 
@@ -34,7 +34,7 @@ private:
     CalibrationProfile profile_{};
     std::vector<Quat> rawQuats_;
     std::vector<Quat> smoothQuats_;
-    double strength_ = 0.85;
+    double strength_ = 0.0;
 
     int rectW_ = 160;
     int rectH_ = 90;

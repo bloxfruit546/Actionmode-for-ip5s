@@ -222,17 +222,29 @@ void TranslationalStabilizer2D::reset(const CalibrationProfile& profile, const T
 }
 
 void TranslationalStabilizer2D::feedLumaFrame(size_t frameIndex, const uint8_t* fullLuma, int srcW, int srcH, int srcStride) {
-    if (!fullLuma || srcW < 64 || srcH < 64 || profile_.width == 0 || profile_.height == 0) {
+    if (strength_ <= 0.001 || !fullLuma || srcW < 64 || srcH < 64 || profile_.width == 0 || profile_.height == 0) {
         return;
     }
 
     downsampleBoxAvg(fullLuma, srcW, srcH, srcStride, scratchDown_.data(), rectW_, rectH_);
 
-    const size_t nTraj = std::min(rawQuats_.size(), smoothQuats_.size());
+    if (!hasPrev_) {
+        prevRect_ = scratchDown_;
+        prevMask_.assign(static_cast<size_t>(rectW_ * rectH_), 1);
+        hasPrev_ = true;
+        return;
+    }
+
+    // Pure Inter-Frame Gyro De-rotation:
+    // De-rotate frame i (scratchDown_) to frame i-1's orientation using relative rotation:
+    // qCorr = q_raw(t_i)^(-1) * q_raw(t_{i-1}) = q_raw[i].conjugate() * q_raw[i-1].
+    // If camera purely rotates (no 3D translation), frame i after de-rotation matches frame i-1 (dx=0, dy=0)!
+    const size_t nTraj = rawQuats_.size();
     Quat qCorr = Quat::identity();
-    if (nTraj > 0) {
-        const size_t qIdx = std::min(frameIndex, nTraj - 1);
-        qCorr = (rawQuats_[qIdx].conjugate() * smoothQuats_[qIdx]).normalized();
+    if (nTraj > 0 && frameIndex > 0) {
+        const size_t qCur = std::min(frameIndex, nTraj - 1);
+        const size_t qPrev = std::min(frameIndex - 1, nTraj - 1);
+        qCorr = (rawQuats_[qCur].conjugate() * rawQuats_[qPrev]).normalized();
     }
 
     const double scaleX = static_cast<double>(rectW_) / static_cast<double>(profile_.width);
@@ -247,7 +259,7 @@ void TranslationalStabilizer2D::feedLumaFrame(size_t frameIndex, const uint8_t* 
         currRect_.data(), currMask_.data()
     );
 
-    if (hasPrev_ && frameIndex < deltas_.size()) {
+    if (frameIndex < deltas_.size()) {
         const int searchRad = 6;
         const int gridCols = (rectW_ >= rectH_) ? 6 : 4;
         const int gridRows = (rectW_ >= rectH_) ? 4 : 6;
@@ -393,13 +405,17 @@ void TranslationalStabilizer2D::feedLumaFrame(size_t frameIndex, const uint8_t* 
         }
     }
 
-    std::swap(prevRect_, currRect_);
-    std::swap(prevMask_, currMask_);
+    // Save current raw downsampled frame for next frame's pure inter-frame de-rotation
+    prevRect_ = scratchDown_;
+    prevMask_.assign(static_cast<size_t>(rectW_ * rectH_), 1);
     hasPrev_ = true;
 }
 
 Translational2DResult TranslationalStabilizer2D::finalize(double nominalFps) const {
     Translational2DResult res;
+    if (strength_ <= 0.001) {
+        return res; // Opt-in: bypass completely when strength is 0
+    }
     const size_t n = deltas_.size();
     if (n < 3 || profile_.width == 0 || profile_.height == 0) {
         return res;
@@ -426,34 +442,53 @@ Translational2DResult TranslationalStabilizer2D::finalize(double nominalFps) con
         }
     }
 
-    // 2-Pass Zero-Phase Forward-Backward Low-Pass Filter (tau_2D = 0.55s) for 1.5-4 Hz footstep isolation
-    const double alpha = std::exp(-dt / 0.55);
-    auto zeroPhaseLPF = [&](const std::vector<double>& in) -> std::vector<double> {
-        std::vector<double> cur = in;
-        for (int pass = 0; pass < 2; ++pass) {
-            std::vector<double> fwd(n, cur[0]);
-            for (size_t i = 1; i < n; ++i) {
-                fwd[i] = alpha * fwd[i - 1] + (1.0 - alpha) * cur[i];
-            }
-            std::vector<double> bwd = fwd;
-            for (size_t i = n - 1; i > 0; --i) {
-                const size_t idx = i - 1;
-                bwd[idx] = alpha * bwd[idx + 1] + (1.0 - alpha) * fwd[idx];
-            }
-            cur = std::move(bwd);
+    // Zero-Phase Narrow Band-Pass Filter (1.5 Hz - 4.5 Hz):
+    // LP (tau = 0.032s ~ 5.0 Hz cutoff) suppresses high-frequency sub-pixel quantization noise.
+    // HP (subtracting baseline tau = 0.133s ~ 1.2 Hz cutoff) eliminates low-frequency drift.
+    auto zeroPhaseLPF = [&](const std::vector<double>& in, double tau) -> std::vector<double> {
+        const double alpha = std::exp(-dt / std::max(tau, 1e-4));
+        std::vector<double> fwd(n, in[0]);
+        for (size_t i = 1; i < n; ++i) {
+            fwd[i] = alpha * fwd[i - 1] + (1.0 - alpha) * in[i];
         }
-        return cur;
+        std::vector<double> bwd = fwd;
+        for (size_t i = n - 1; i > 0; --i) {
+            const size_t idx = i - 1;
+            bwd[idx] = alpha * bwd[idx + 1] + (1.0 - alpha) * fwd[idx];
+        }
+        return bwd;
     };
 
-    const std::vector<double> smoothX = zeroPhaseLPF(posX);
-    const std::vector<double> smoothY = zeroPhaseLPF(posY);
+    const std::vector<double> lpX = zeroPhaseLPF(posX, 0.012);
+    const std::vector<double> lpY = zeroPhaseLPF(posY, 0.012);
+    const std::vector<double> baseDriftX = zeroPhaseLPF(posX, 0.160);
+    const std::vector<double> baseDriftY = zeroPhaseLPF(posY, 0.160);
 
     res.shiftXBase.resize(n, 0.0);
     res.shiftYBase.resize(n, 0.0);
     double maxAmp = 0.0, sumSq = 0.0;
     for (size_t i = 0; i < n; ++i) {
-        const double sx = strength_ * (posX[i] - smoothX[i]);
-        const double sy = strength_ * (posY[i] - smoothY[i]);
+        double sx = lpX[i] - baseDriftX[i];
+        double sy = lpY[i] - baseDriftY[i];
+
+        // Deadzone: eliminate micro-jitter (< 0.25 px on 1080p)
+        const double mag = std::hypot(sx, sy);
+        if (mag < 0.25) {
+            sx = 0.0;
+            sy = 0.0;
+        } else {
+            // Hard clamp to +-24 px maximum
+            constexpr double kMaxClamp = 24.0;
+            if (mag > kMaxClamp) {
+                const double sc = kMaxClamp / mag;
+                sx *= sc;
+                sy *= sc;
+            }
+        }
+
+        sx *= strength_;
+        sy *= strength_;
+
         res.shiftXBase[i] = sx;
         res.shiftYBase[i] = sy;
         const double amp = std::hypot(sx, sy);
@@ -464,7 +499,7 @@ Translational2DResult TranslationalStabilizer2D::finalize(double nominalFps) con
     res.maxShiftPx = maxAmp;
     res.rmsShiftPx = std::sqrt(sumSq / static_cast<double>(n));
     res.validFrameCount = validCount;
-    res.valid = true;
+    res.valid = (validCount > 0);
     return res;
 }
 
