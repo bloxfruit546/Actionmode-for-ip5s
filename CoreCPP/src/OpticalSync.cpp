@@ -556,9 +556,10 @@ OpticalSyncResult OpticalSync::solveSyncAndAxes(
             for (int iter = 0; iter < 3; ++iter) {
                 double num = 0.0;
                 double den = 0.0;
+                const double wHoriz = 1.5; // Prioritize horizontal displacement matching (viewer sensitivity)
                 for (const auto& p : pairs) {
-                    num += p.weight * (p.vwx * p.iwx + p.vwy * p.iwy);
-                    den += p.weight * (p.iwx * p.iwx + p.iwy * p.iwy);
+                    num += p.weight * (p.vwx * p.iwx + wHoriz * p.vwy * p.iwy);
+                    den += p.weight * (p.iwx * p.iwx + wHoriz * p.iwy * p.iwy);
                 }
                 if (den <= 1e-9) break;
                 focalScale = num / den;

@@ -259,7 +259,7 @@ WarpComputationResult FrameWarpCalculator::computeAllFramesWithRollingShutter(
         }
 
         // Smooth pullFactor (two-pass min-envelope IIR) so pull-back never causes derivative discontinuities
-        const double alphaPull = std::exp(-dt / 0.35);
+        const double alphaPull = std::exp(-dt / 0.50);
         for (size_t i = 1; i < n; ++i) {
             pullFactor[i] = std::min(pullFactor[i], alphaPull * pullFactor[i - 1] + (1.0 - alphaPull) * pullFactor[i]);
         }

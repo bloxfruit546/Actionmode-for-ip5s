@@ -24,6 +24,20 @@ Vec3 applyAxisMatrix(const double m[9], const Vec3& v) {
     );
 }
 
+void smoothMovingAverage(std::vector<double>& arr, int radius) {
+    const size_t sz = arr.size();
+    if (sz <= 1 || radius <= 0) return;
+    std::vector<double> out(sz);
+    std::vector<double> prefix(sz + 1, 0.0);
+    for (size_t i = 0; i < sz; ++i) prefix[i + 1] = prefix[i] + arr[i];
+    for (size_t i = 0; i < sz; ++i) {
+        const size_t lo = static_cast<size_t>(std::max(0, static_cast<int>(i) - radius));
+        const size_t hi = static_cast<size_t>(std::min(static_cast<int>(sz) - 1, static_cast<int>(i) + radius));
+        out[i] = (prefix[hi + 1] - prefix[lo]) / static_cast<double>(hi - lo + 1);
+    }
+    arr = std::move(out);
+}
+
 Quat slerpShortest(const Quat& a, const Quat& b, double t) {
     return Quat::slerp(a, b, t);
 }
@@ -591,9 +605,8 @@ TrajectoryResult TrajectoryEngine::solve(
 
     const double dtF = 1.0 / nominalFps_;
 
-    // True Net-Displacement Pan Detector over +-0.50s window:
-    // panRatio = D_i / (L_i + 1e-4). Only damp tau when panRatio > 0.65 AND D_i > 12 deg.
-    const int radius = std::max(2, static_cast<int>(std::round(0.50 * nominalFps_)));
+    // True Net-Displacement Pan Detector over +-0.60s window:
+    const int radius = std::max(2, static_cast<int>(std::round(0.60 * nominalFps_)));
     std::vector<double> stepAngles(n, 0.0);
     for (size_t i = 1; i < n; ++i) {
         stepAngles[i] = rotationAngleBetween(result.rawFrameQuats[i - 1], result.rawFrameQuats[i]);
@@ -601,8 +614,8 @@ TrajectoryResult TrajectoryEngine::solve(
 
     std::vector<double> panActivity(n, 0.0);
     std::vector<double> panRatioArr(n, 0.0);
+    std::vector<double> omegaIntent(n, 0.0);
     double panRatioSum = 0.0;
-    const double minNetDispRad = 12.0 * (kPi / 180.0);
 
     for (size_t i = 0; i < n; ++i) {
         const size_t lo = static_cast<size_t>(std::max(0, static_cast<int>(i) - radius));
@@ -616,11 +629,20 @@ TrajectoryResult TrajectoryEngine::solve(
         panRatioArr[i] = std::min(1.0, std::max(0.0, ratio));
         panRatioSum += ratio;
 
-        if (ratio > 0.65 && netDisp > minNetDispRad) {
-            panActivity[i] = std::min(1.0, (ratio - 0.65) / 0.35);
+        const double dtSpan = std::max(1e-4, static_cast<double>(hi - lo) * dtF);
+        const double omegaNet = netDisp / dtSpan;
+
+        // Strict intentional pan condition: unidirectional motion (panRatio > 0.72)
+        if (ratio > 0.72) {
+            const double rPart = std::min(1.0, (ratio - 0.72) / (0.92 - 0.72));
+            panActivity[i] = rPart;
+        } else {
+            panActivity[i] = 0.0;
         }
+        omegaIntent[i] = omegaNet * panActivity[i];
     }
     result.avgPanRatio = panRatioSum / static_cast<double>(n);
+    smoothScalarGaussianTwoPass(omegaIntent, 3.0);
 
     const double pSmooth = (config.pitchSmoothness >= 0.0) ? config.pitchSmoothness : config.smoothness;
     const double ySmooth = (config.yawSmoothness >= 0.0)   ? config.yawSmoothness   : config.smoothness;
@@ -635,97 +657,100 @@ TrajectoryResult TrajectoryEngine::solve(
         return result;
     }
 
-    // Dual-Band Velocity-Adaptive Zero-Phase Pitch/Yaw Smoother:
-    // 1. Measure intentional pan speed omega_intent using panRatio = netDisp / pathLen.
-    //    High-frequency hand shake has large pathLen but near-zero netDisp (ratio < 0.30 -> panActivity = 0),
-    //    so omega_intent remains 0.0 and tau remains rock-solid at tau_hold.
-    std::vector<double> omegaIntent(n, 0.0);
-    for (size_t i = 0; i < n; ++i) {
-        const size_t lo = static_cast<size_t>(std::max(0, static_cast<int>(i) - radius));
-        const size_t hi = static_cast<size_t>(std::min(static_cast<int>(n) - 1, static_cast<int>(i) + radius));
-        const double netAngle = rotationAngleBetween(result.rawFrameQuats[lo], result.rawFrameQuats[hi]);
-        const double dtSpan = std::max(1e-4, static_cast<double>(hi - lo) * dtF);
-        omegaIntent[i] = (netAngle / dtSpan) * panActivity[i];
-    }
-    smoothScalarGaussianTwoPass(omegaIntent, 3.0);
+    const bool isPortrait = (config.videoRotationDegrees == 90 || config.videoRotationDegrees == 270);
+    // On Portrait: Viewer horizontal is Camera X (1080 sensor height), vertical is Camera Y (1920 sensor width).
+    // On Landscape: Viewer horizontal is Camera Y (1920 sensor width), vertical is Camera X (1080 sensor height).
+    const double smoothCamX = isPortrait ? ySmooth : pSmooth;
+    const double smoothCamY = isPortrait ? pSmooth : ySmooth;
+    const double smoothCamZ = rSmooth;
 
-    // 2. Tau calculation: tau_hold (~1.6s for Action Mode s=0.78) when holding/walking (omega_intent < 0.12 rad/s),
-    //    smoothly decaying via cubic smoothstep to tau_pan = 0.28s when panning (omega_intent > 0.25 rad/s).
-    std::vector<double> tauPitch(n, 1.6);
-    std::vector<double> tauYaw(n, 1.6);
-    std::vector<double> tauRoll(n, 1.8);
+    const double xBoost = (smoothCamX > 0.75) ? (0.60 * std::pow((smoothCamX - 0.75) / 0.25, 1.3)) : 0.0;
+    const double yBoost = (smoothCamY > 0.75) ? (0.60 * std::pow((smoothCamY - 0.75) / 0.25, 1.3)) : 0.0;
+    const double zBoost = (smoothCamZ > 0.75) ? (0.60 * std::pow((smoothCamZ - 0.75) / 0.25, 1.3)) : 0.0;
 
-    const double maxSmooth = std::max(pSmooth, std::max(ySmooth, rSmooth));
-    const int numPasses = (maxSmooth > 0.75) ? 4 : 3;
+    // Action Mode base tau_hold >= 2.2s for s=0.78, reaching ~3.6s for s=0.88
+    const double tauHoldCamX = 0.05 + 1.20 * smoothCamX + 3.80 * std::pow(smoothCamX, 3.2) + xBoost;
+    const double tauHoldCamY = 0.05 + 1.20 * smoothCamY + 3.80 * std::pow(smoothCamY, 3.2) + yBoost;
+    const double tauHoldCamZ = 0.05 + 1.20 * smoothCamZ + 3.80 * std::pow(smoothCamZ, 3.2) + zBoost;
+    const double tauPan = config.motoActionMode ? 0.35 : 0.58; // Moto mode 0.35s cornering, standard 0.58s floor
 
-    const double pBoost = (pSmooth > 0.75) ? (0.50 * std::pow((pSmooth - 0.75) / 0.25, 1.3)) : 0.0;
-    const double yBoost = (ySmooth > 0.75) ? (0.50 * std::pow((ySmooth - 0.75) / 0.25, 1.3)) : 0.0;
-    const double rBoost = (rSmooth > 0.75) ? (0.50 * std::pow((rSmooth - 0.75) / 0.25, 1.3)) : 0.0;
-    const double tauHoldPitch = 0.02 + 0.90 * pSmooth + 3.08 * std::pow(pSmooth, 3.5) + pBoost;
-    const double tauHoldYaw   = 0.02 + 0.90 * ySmooth + 3.08 * std::pow(ySmooth, 3.5) + yBoost;
-    const double tauHoldRoll  = 0.02 + 0.90 * rSmooth + 3.08 * std::pow(rSmooth, 3.5) + rBoost;
-    const double tauPan = 0.28;
+    std::vector<double> tauCamX(n, tauHoldCamX);
+    std::vector<double> tauCamY(n, tauHoldCamY);
+    std::vector<double> tauCamZ(n, tauHoldCamZ);
 
     for (size_t i = 0; i < n; ++i) {
-        double wPitch = omegaIntent[i];
-        double wYaw = omegaIntent[i];
+        double wX = omegaIntent[i];
+        double wY = omegaIntent[i];
         if (config.motoActionMode) {
-            wPitch *= 0.25; // Preserve deep pitch hold against vertical pothole shocks in moto mode
+            // In moto mode, preserve pitch hold against vertical shocks
+            if (isPortrait) wY *= 0.25; else wX *= 0.25;
         }
-        const double uP = std::min(1.0, std::max(0.0, (wPitch - 0.12) / (0.25 - 0.12)));
-        const double sP = uP * uP * (3.0 - 2.0 * uP); // Cubic smoothstep
+        const double wMin = config.motoActionMode ? 0.18 : 0.25;
+        const double wMax = config.motoActionMode ? 0.45 : 0.55;
+        const double uX = std::min(1.0, std::max(0.0, (wX - wMin) / (wMax - wMin)));
+        const double sX = uX * uX * (3.0 - 2.0 * uX); // Cubic smoothstep
 
-        const double uY = std::min(1.0, std::max(0.0, (wYaw - 0.12) / (0.25 - 0.12)));
+        const double uY = std::min(1.0, std::max(0.0, (wY - wMin) / (wMax - wMin)));
         const double sY = uY * uY * (3.0 - 2.0 * uY);
 
         const double effDamp = std::max(1.0, config.velocityDamping);
-        tauPitch[i] = (tauHoldPitch + sP * (tauPan - tauHoldPitch)) / (1.0 + (effDamp - 1.0) * sP);
-        tauYaw[i]   = (tauHoldYaw   + sY * (tauPan - tauHoldYaw))   / (1.0 + (effDamp - 1.0) * sY);
-        tauRoll[i]  = tauHoldRoll / (1.0 + sP * 2.0);
+        tauCamX[i] = (tauHoldCamX + sX * (tauPan - tauHoldCamX)) / (1.0 + (effDamp - 1.0) * sX);
+        tauCamY[i] = (tauHoldCamY + sY * (tauPan - tauHoldCamY)) / (1.0 + (effDamp - 1.0) * sY);
+        tauCamZ[i] = tauHoldCamZ / (1.0 + std::max(sX, sY) * 1.5);
     }
 
-        // Forward-Backward Zero-Phase Smoother in so(3)
-        std::vector<Quat> current = result.rawFrameQuats;
-        std::vector<Quat> qFwd(n);
-        std::vector<Quat> qBwd(n);
+    // Smooth tau curves using moving average over +-15 frames (+-0.5s) to guarantee zero step jumps
+    const int tauWin = std::max(2, static_cast<int>(std::round(0.50 * nominalFps_)));
+    smoothMovingAverage(tauCamX, tauWin);
+    smoothMovingAverage(tauCamY, tauWin);
+    smoothMovingAverage(tauCamZ, tauWin);
 
-        for (int pass = 0; pass < numPasses; ++pass) {
-            qFwd[0] = current[0];
-            for (size_t i = 1; i < n; ++i) {
-                const double aPitch = std::exp(-dtF / std::max(tauPitch[i], 1e-4));
-                const double aYaw   = std::exp(-dtF / std::max(tauYaw[i],   1e-4));
-                const double aRoll  = std::exp(-dtF / std::max(tauRoll[i],  1e-4));
+    // Forward-Backward Zero-Phase Smoother in so(3)
+    std::vector<Quat> current = result.rawFrameQuats;
+    std::vector<Quat> qFwd(n);
+    std::vector<Quat> qBwd(n);
 
-                const Vec3 rDiff = quatLog(qFwd[i - 1].conjugate() * current[i]);
-                const Vec3 rStep(
-                    rDiff.x * (1.0 - aPitch),
-                    rDiff.y * (1.0 - aYaw),
-                    rDiff.z * (1.0 - aRoll)
-                );
-                qFwd[i] = (qFwd[i - 1] * quatExp(rStep)).normalized();
-            }
+    // Multi-pass zero-phase forward-backward smoothing (each pass is forward + backward)
+    const double maxSmooth = std::max(smoothCamX, std::max(smoothCamY, smoothCamZ));
+    const int numPasses = config.motoActionMode ? 1 : ((maxSmooth > 0.85) ? 2 : 1);
 
-            qBwd[n - 1] = qFwd[n - 1];
-            for (size_t i = n - 1; i > 0; --i) {
-                const size_t idx = i - 1;
-                const double aPitch = std::exp(-dtF / std::max(tauPitch[idx], 1e-4));
-                const double aYaw   = std::exp(-dtF / std::max(tauYaw[idx],   1e-4));
-                const double aRoll  = std::exp(-dtF / std::max(tauRoll[idx],  1e-4));
+    for (int pass = 0; pass < numPasses; ++pass) {
+        qFwd[0] = current[0];
+        for (size_t i = 1; i < n; ++i) {
+            const double aX = std::exp(-dtF / std::max(tauCamX[i], 1e-4));
+            const double aY = std::exp(-dtF / std::max(tauCamY[i], 1e-4));
+            const double aZ = std::exp(-dtF / std::max(tauCamZ[i], 1e-4));
 
-                const Vec3 rDiff = quatLog(qBwd[idx + 1].conjugate() * qFwd[idx]);
-                const Vec3 rStep(
-                    rDiff.x * (1.0 - aPitch),
-                    rDiff.y * (1.0 - aYaw),
-                    rDiff.z * (1.0 - aRoll)
-                );
-                qBwd[idx] = (qBwd[idx + 1] * quatExp(rStep)).normalized();
-            }
-
-            current = std::move(qBwd);
-            qBwd.resize(n);
+            const Vec3 rDiff = quatLog(qFwd[i - 1].conjugate() * current[i]);
+            const Vec3 rStep(
+                rDiff.x * (1.0 - aX),
+                rDiff.y * (1.0 - aY),
+                rDiff.z * (1.0 - aZ)
+            );
+            qFwd[i] = (qFwd[i - 1] * quatExp(rStep)).normalized();
         }
 
-        result.smoothFrameQuats = std::move(current);
+        qBwd[n - 1] = qFwd[n - 1];
+        for (size_t i = n - 1; i > 0; --i) {
+            const size_t idx = i - 1;
+            const double aX = std::exp(-dtF / std::max(tauCamX[idx], 1e-4));
+            const double aY = std::exp(-dtF / std::max(tauCamY[idx], 1e-4));
+            const double aZ = std::exp(-dtF / std::max(tauCamZ[idx], 1e-4));
+
+            const Vec3 rDiff = quatLog(qBwd[idx + 1].conjugate() * qFwd[idx]);
+            const Vec3 rStep(
+                rDiff.x * (1.0 - aX),
+                rDiff.y * (1.0 - aY),
+                rDiff.z * (1.0 - aZ)
+            );
+            qBwd[idx] = (qBwd[idx + 1] * quatExp(rStep)).normalized();
+        }
+
+        current = std::move(qBwd);
+        qBwd.resize(n);
+    }
+
+    result.smoothFrameQuats = std::move(current);
 
     // Horizon Mode: Off / Action Level (±40°) / Full 360° Lock
     const int horizonQuadrantDeg = detectGravityQuadrantDeg(frameGravityW[0]);
@@ -790,55 +815,154 @@ TrajectoryResult TrajectoryEngine::solve(
         result.smoothFrameQuats = std::move(polished);
     }
 
-    // Soft-Knee Boundary Clamping (Zero Edge Bounce):
-    // Computes safe angular limits (thetaLimX, thetaLimY) corresponding to selected maxZoomLimit / Fixed Crop.
-    // Soft-knee tanh compression begins at 65% of the limit (R_knee = 0.624 * limit) and asymptotes to 0.96 * limit.
-    const bool isPortrait = (config.videoRotationDegrees == 90 || config.videoRotationDegrees == 270);
-    const double widthPx = isPortrait ? 1080.0 : 1920.0;
-    const double heightPx = isPortrait ? 1920.0 : 1080.0;
+    // Anisotropic Rectangular Soft-Knee Clamping (16:9 boundary protection):
+    // Computes independent angular limits for camera pitch (X) and camera yaw (Y),
+    // accounting for the exact roll angle delta_phi of each frame from Horizon Lock.
+    const double sensorWidthPx = 1920.0;
+    const double sensorHeightPx = 1080.0;
     const double fxNominal = 1815.0;
     const double fyNominal = 1815.0;
 
-    double thetaLimX = 24.5 * (kPi / 180.0);
-    double thetaLimY = 24.5 * (kPi / 180.0);
-    double maxSwingReport = 24.5;
-    if (config.maxZoomLimit > 1.0 && config.maxZoomLimit <= 1.45) {
-        const double Z = config.maxZoomLimit;
-        const double marginX = (widthPx * 0.5) * (1.0 - 1.0 / Z);
-        const double marginY = (heightPx * 0.5) * (1.0 - 1.0 / Z);
-        thetaLimX = std::atan(marginX / fxNominal);
-        thetaLimY = std::atan(marginY / fyNominal);
-        maxSwingReport = std::max(thetaLimX, thetaLimY) * (180.0 / kPi);
-    }
+    const bool hasTightZoomLimit = (config.maxZoomLimit > 1.0 && config.maxZoomLimit <= 1.45);
+    const double targetZ = hasTightZoomLimit ? config.maxZoomLimit : 1.32;
+    const double halfW = (sensorWidthPx * 0.5) / targetZ;
+    const double halfH = (sensorHeightPx * 0.5) / targetZ;
+    const double maxU = (sensorWidthPx * 0.5) - 4.0; // 956 px safe bound
+    const double maxV = (sensorHeightPx * 0.5) - 4.0; // 536 px safe bound
 
-    constexpr double kHardRadius = 0.96;
-    const double kKneeRatio = (config.maxZoomLimit > 1.45) ? 0.76 : 0.65;
-    const double kKneeRadius = kKneeRatio * kHardRadius;
-    const double kHeadroomRadius = kHardRadius - kKneeRadius;
+    auto softKnee1D = [](double val, double limit) -> double {
+        const double kHard = 0.96 * limit;
+        const double knee = 0.62 * limit;
+        const double headroom = std::max(1e-5, kHard - knee); // 0.34 * limit
+        const double absVal = std::fabs(val);
+        if (absVal <= knee) {
+            return val;
+        }
+        const double sign = (val >= 0.0) ? 1.0 : -1.0;
+        return sign * (knee + headroom * std::tanh((absVal - knee) / headroom));
+    };
 
     const Vec3 zAxis(0.0, 0.0, 1.0);
+    double maxSwingReport = hasTightZoomLimit ? 0.0 : 24.5;
+
     for (size_t i = 0; i < n; ++i) {
         const Quat qCorr = (result.rawFrameQuats[i].conjugate() * result.smoothFrameQuats[i]).normalized();
         Quat qSwing, qTwist;
         Quat::decomposeSwingTwist(qCorr, zAxis, qSwing, qTwist);
 
-        const Vec3 rSwing = quatLog(qSwing); // (deltaPitch, deltaYaw, 0)
-        const double rNorm = std::sqrt(
-            (rSwing.y / std::max(1e-4, thetaLimX)) * (rSwing.y / std::max(1e-4, thetaLimX)) +
-            (rSwing.x / std::max(1e-4, thetaLimY)) * (rSwing.x / std::max(1e-4, thetaLimY))
-        );
+        // Exact roll angle delta_phi around Z
+        const double rollRad = 2.0 * std::atan2(qTwist.z, qTwist.w);
+        const double cosR = std::fabs(std::cos(rollRad));
+        const double sinR = std::fabs(std::sin(rollRad));
 
-        if (rNorm > kKneeRadius) {
-            const double rComp = kKneeRadius + kHeadroomRadius * std::tanh((rNorm - kKneeRadius) / kHeadroomRadius);
-            const double scale = rComp / rNorm;
-            const Vec3 rSwingComp(rSwing.x * scale, rSwing.y * scale, 0.0);
-            const Quat qSwingComp = quatExp(rSwingComp);
-            const Quat qCorrLimited = (qSwingComp * qTwist).normalized();
-            result.smoothFrameQuats[i] = (result.rawFrameQuats[i] * qCorrLimited).normalized();
+        // Maximum extent of virtual rectangle corners after roll
+        const double maxUr = halfW * cosR + halfH * sinR;
+        const double maxVr = halfW * sinR + halfH * cosR;
+
+        // Remaining angular margin for yaw (Y) and pitch (X)
+        double limitY = 24.5 * (kPi / 180.0);
+        double limitX = 24.5 * (kPi / 180.0);
+        if (hasTightZoomLimit) {
+            const double availU = std::max(2.0, maxU - maxUr);
+            const double availV = std::max(2.0, maxV - maxVr);
+            limitY = std::atan(availU / fxNominal); // Yaw (around Y) moves pixel U
+            limitX = std::atan(availV / fyNominal); // Pitch (around X) moves pixel V
+            maxSwingReport = std::max(maxSwingReport, std::max(limitX, limitY) * (180.0 / kPi));
         }
+
+        const Vec3 rSwing = quatLog(qSwing); // (rx=pitch, ry=yaw, 0)
+        const double rxComp = softKnee1D(rSwing.x, limitX);
+        const double ryComp = softKnee1D(rSwing.y, limitY);
+
+        const Quat qSwingComp = quatExp(Vec3(rxComp, ryComp, 0.0));
+        const Quat qCorrLimited = (qSwingComp * qTwist).normalized();
+        result.smoothFrameQuats[i] = (result.rawFrameQuats[i] * qCorrLimited).normalized();
     }
 
     result.maxSwingCapDeg = maxSwingReport;
+
+    // 2-pass Gaussian smoothing (sigma = 3.0 frames) in so(3) directly on clamped trajectory
+    if (n >= 7) {
+        constexpr int kRad = 5;
+        constexpr double sigma = 3.0;
+        double gWeights[2 * kRad + 1];
+        double wSum = 0.0;
+        for (int k = -kRad; k <= kRad; ++k) {
+            gWeights[k + kRad] = std::exp(-static_cast<double>(k * k) / (2.0 * sigma * sigma));
+            wSum += gWeights[k + kRad];
+        }
+        for (int k = 0; k < 2 * kRad + 1; ++k) {
+            gWeights[k] /= wSum;
+        }
+
+        for (int pass = 0; pass < 2; ++pass) {
+            std::vector<Quat> smoothed = result.smoothFrameQuats;
+            for (size_t i = 0; i < n; ++i) {
+                const Quat& qCenter = result.smoothFrameQuats[i];
+                Vec3 rAvg(0.0, 0.0, 0.0);
+                double localWSum = 0.0;
+                for (int k = -kRad; k <= kRad; ++k) {
+                    const int idx = static_cast<int>(i) + k;
+                    if (idx >= 0 && idx < static_cast<int>(n)) {
+                        const double w = gWeights[k + kRad];
+                        const Vec3 rk = quatLog(qCenter.conjugate() * result.smoothFrameQuats[static_cast<size_t>(idx)]);
+                        rAvg = rAvg + rk * w;
+                        localWSum += w;
+                    }
+                }
+                if (localWSum > 1e-6) {
+                    rAvg = rAvg * (1.0 / localWSum);
+                }
+                smoothed[i] = (qCenter * quatExp(rAvg)).normalized();
+            }
+            result.smoothFrameQuats = std::move(smoothed);
+        }
+    }
+
+    // Post-smoothing hard ceiling safeguard to guarantee zero black border and strict <= 24.5 deg swing ceiling
+    for (size_t i = 0; i < n; ++i) {
+        const Quat qCorr = (result.rawFrameQuats[i].conjugate() * result.smoothFrameQuats[i]).normalized();
+        Quat qSwing, qTwist;
+        Quat::decomposeSwingTwist(qCorr, zAxis, qSwing, qTwist);
+        const Vec3 rSwing = quatLog(qSwing);
+
+        double capY = 24.45 * (kPi / 180.0);
+        double capX = 24.45 * (kPi / 180.0);
+        if (hasTightZoomLimit) {
+            const double rollRad = 2.0 * std::atan2(qTwist.z, qTwist.w);
+            const double cosR = std::fabs(std::cos(rollRad));
+            const double sinR = std::fabs(std::sin(rollRad));
+            const double maxUr = halfW * cosR + halfH * sinR;
+            const double maxVr = halfW * sinR + halfH * cosR;
+            const double availU = std::max(2.0, maxU - maxUr);
+            const double availV = std::max(2.0, maxV - maxVr);
+            capY = std::atan(availU / fxNominal);
+            capX = std::atan(availV / fyNominal);
+        }
+
+        double rx = rSwing.x;
+        double ry = rSwing.y;
+        bool clamped = false;
+        if (std::fabs(rx) > capX) {
+            rx = std::min(capX, std::max(-capX, rx));
+            clamped = true;
+        }
+        if (std::fabs(ry) > capY) {
+            ry = std::min(capY, std::max(-capY, ry));
+            clamped = true;
+        }
+        const double swingMag = std::hypot(rx, ry);
+        const double maxSwingRad = 24.45 * (kPi / 180.0);
+        if (swingMag > maxSwingRad) {
+            const double scale = maxSwingRad / swingMag;
+            rx *= scale;
+            ry *= scale;
+            clamped = true;
+        }
+        if (clamped) {
+            result.smoothFrameQuats[i] = (result.rawFrameQuats[i] * (quatExp(Vec3(rx, ry, 0.0)) * qTwist)).normalized();
+        }
+    }
 
     result.rawAngularAccelRms = computeAngularAccelRms(result.rawFrameQuats, dtF);
     result.smoothAngularAccelRms = computeAngularAccelRms(result.smoothFrameQuats, dtF);

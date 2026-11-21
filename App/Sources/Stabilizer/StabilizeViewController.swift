@@ -336,9 +336,9 @@ final class StabilizeViewController: UIViewController {
         }
 
         configureSlider(pitchSlider, min: 0.0, max: 1.0, val: 0.78)
-        configureSlider(yawSlider, min: 0.0, max: 1.0, val: 0.78)
+        configureSlider(yawSlider, min: 0.0, max: 1.0, val: 0.88)
         configureSlider(rollSlider, min: 0.0, max: 1.0, val: 0.85)
-        configureSlider(zoomSlider, min: 1.05, max: 2.40, val: 1.28)
+        configureSlider(zoomSlider, min: 1.05, max: 2.40, val: 1.32)
         configureSlider(tiltSlider, min: -15.0, max: 15.0, val: 0.0)
         configureSlider(trans2DStrengthSlider, min: 0.0, max: 1.0, val: 0.0)
         configureSlider(sharpenSlider, min: 0.0, max: 1.0, val: 0.45)
@@ -555,13 +555,13 @@ final class StabilizeViewController: UIViewController {
     @objc private func handleActionModePreset() {
         motoActionSwitch.isOn = false
         pitchSlider.value = 0.78
-        yawSlider.value = 0.78
+        yawSlider.value = 0.88
         rollSlider.value = 0.85
         horizonModeControl.selectedSegmentIndex = 1
         hybridResidualSwitch.isOn = false
         trans2DStrengthSlider.value = 0.0
         unlimitedZoomSwitch.isOn = false
-        zoomSlider.value = 1.28
+        zoomSlider.value = 1.32
         rsSwitch.isOn = true
         zoomModeControl.selectedSegmentIndex = 0
         updateSliderLabels()
