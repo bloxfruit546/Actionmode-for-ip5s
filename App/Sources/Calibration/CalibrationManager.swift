@@ -112,11 +112,11 @@ final class CalibrationManager {
             guard let hist = current.modeHistory?[key], !hist.readoutMsSamples.isEmpty else {
                 return (false, defaultRsMs, 1.0, 1.0, 1.0, 1.0)
             }
-            let rs = GFCalibrationRefinerBridge.median(ofNumbers: hist.readoutMsSamples.map { NSNumber(value: $0) })
-            let fs = hist.focalScaleSamples.isEmpty ? 1.0 : GFCalibrationRefinerBridge.median(ofNumbers: hist.focalScaleSamples.map { NSNumber(value: $0) })
-            let sx = hist.scaleXSamples.isEmpty ? 1.0 : GFCalibrationRefinerBridge.median(ofNumbers: hist.scaleXSamples.map { NSNumber(value: $0) })
-            let sy = hist.scaleYSamples.isEmpty ? 1.0 : GFCalibrationRefinerBridge.median(ofNumbers: hist.scaleYSamples.map { NSNumber(value: $0) })
-            let sz = hist.scaleZSamples.isEmpty ? 1.0 : GFCalibrationRefinerBridge.median(ofNumbers: hist.scaleZSamples.map { NSNumber(value: $0) })
+            let rs = GFCalibrationRefinerBridge.median(of: hist.readoutMsSamples.map { NSNumber(value: $0) })
+            let fs = hist.focalScaleSamples.isEmpty ? 1.0 : GFCalibrationRefinerBridge.median(of: hist.focalScaleSamples.map { NSNumber(value: $0) })
+            let sx = hist.scaleXSamples.isEmpty ? 1.0 : GFCalibrationRefinerBridge.median(of: hist.scaleXSamples.map { NSNumber(value: $0) })
+            let sy = hist.scaleYSamples.isEmpty ? 1.0 : GFCalibrationRefinerBridge.median(of: hist.scaleYSamples.map { NSNumber(value: $0) })
+            let sz = hist.scaleZSamples.isEmpty ? 1.0 : GFCalibrationRefinerBridge.median(of: hist.scaleZSamples.map { NSNumber(value: $0) })
             return (true, rs, fs, sx, sy, sz)
         }
     }
