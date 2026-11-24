@@ -110,6 +110,17 @@ final class CameraViewController: UIViewController {
         return btn
     }()
 
+    private let recLockBtn: UIButton = {
+        let btn = UIButton(type: .system)
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        btn.setTitle("RecLock:ON", for: .normal)
+        btn.setTitleColor(UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0), for: .normal)
+        btn.titleLabel?.font = UIFont.systemFont(ofSize: 10.5, weight: .bold)
+        btn.backgroundColor = UIColor(white: 0.18, alpha: 0.85)
+        btn.layer.cornerRadius = 6
+        return btn
+    }()
+
     private let motoBannerLabel: UILabel = {
         let label = UILabel()
         label.translatesAutoresizingMaskIntoConstraints = false
@@ -163,6 +174,7 @@ final class CameraViewController: UIViewController {
         expLockBtn.addTarget(self, action: #selector(handleToggleExp), for: .touchUpInside)
         antiBlurBtn.addTarget(self, action: #selector(handleToggleAntiBlur), for: .touchUpInside)
         motoModeBtn.addTarget(self, action: #selector(handleToggleMotoMode), for: .touchUpInside)
+        recLockBtn.addTarget(self, action: #selector(handleToggleRecLock), for: .touchUpInside)
         recordButton.addTarget(self, action: #selector(handleRecordTap), for: .touchUpInside)
     }
 
@@ -197,7 +209,7 @@ final class CameraViewController: UIViewController {
         view.addSubview(bitrateControl)
         view.addSubview(shutterCapControl)
 
-        let lockRow = UIStackView(arrangedSubviews: [focusLockBtn, expLockBtn, motoModeBtn])
+        let lockRow = UIStackView(arrangedSubviews: [focusLockBtn, expLockBtn, motoModeBtn, recLockBtn])
         lockRow.translatesAutoresizingMaskIntoConstraints = false
         lockRow.axis = .horizontal
         lockRow.spacing = 6
@@ -358,6 +370,13 @@ final class CameraViewController: UIViewController {
         }
     }
 
+    @objc private func handleToggleRecLock() {
+        let next = !engine.lockFocusAndWhiteBalanceOnRecord
+        engine.setLockFocusAndWhiteBalanceOnRecord(next)
+        recLockBtn.setTitle(next ? "RecLock:ON" : "RecLock:OFF", for: .normal)
+        recLockBtn.setTitleColor(next ? UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0) : UIColor(white: 0.75, alpha: 1.0), for: .normal)
+    }
+
     @objc private func handleRecordTap() {
         if engine.isRecording {
             recordButton.isEnabled = false
@@ -428,8 +447,17 @@ extension CameraViewController: ProCameraEngineDelegate {
             recStatusLabel.textColor = UIColor(red: 1.0, green: 0.45, blue: 0.45, alpha: 1.0)
             recStatusLabel.text = "Error: \(err.localizedDescription)"
         } else if let s = summary {
-            recStatusLabel.textColor = UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0)
-            recStatusLabel.text = String(format: "Saved %llu frames (%.1fHz IMU, drop:%u)", s.frameCount, s.gyroHz, s.droppedFrames)
+            let aux = take.flatMap { CaptureTakeStore.loadAuxMetadata(for: $0.uuid) }
+            let hwDrops = aux?.hardwareDroppedFrames ?? 0
+            let wrDrops = aux?.writerDroppedFrames ?? 0
+            let totalDrops = UInt64(s.droppedFrames) + UInt64(hwDrops) + UInt64(wrDrops)
+            if totalDrops > 0 {
+                recStatusLabel.textColor = UIColor(red: 1.0, green: 0.65, blue: 0.20, alpha: 1.0)
+                recStatusLabel.text = String(format: "WARN %llu frames | didDrop:%u wr:%u pts:%u", s.frameCount, hwDrops, wrDrops, s.droppedFrames)
+            } else {
+                recStatusLabel.textColor = UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0)
+                recStatusLabel.text = String(format: "Saved %llu frames (%.1fHz IMU, drop:0)", s.frameCount, s.gyroHz)
+            }
         } else {
             recStatusLabel.text = "READY"
         }

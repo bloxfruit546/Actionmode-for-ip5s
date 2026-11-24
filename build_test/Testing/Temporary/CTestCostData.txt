@@ -1,6 +1,10 @@
-gf_core_math_tests 29 0.00717448
-gf_sidecar_calib_tests 29 0.00599089
-gf_stabilizer_tests 17 0.105481
-gf_horizon_rs_autosync_tests 11 1.85043
-gf_quality_metrics_tests 29 0.115334
+gf_core_math_tests 31 0.000651052
+gf_sidecar_calib_tests 29 0
+gf_stabilizer_tests 17 0
+gf_horizon_rs_autosync_tests 11 0
+gf_quality_metrics_tests 29 0
 ---
+gf_sidecar_calib_tests
+gf_stabilizer_tests
+gf_horizon_rs_autosync_tests
+gf_quality_metrics_tests

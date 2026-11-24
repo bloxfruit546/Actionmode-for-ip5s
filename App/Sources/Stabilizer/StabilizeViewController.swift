@@ -6,6 +6,7 @@ final class StabilizeViewController: UIViewController {
     private let pipeline = OfflineRenderPipeline()
     private var isRendering = false
     private var lastExportedURL: URL?
+    private var lastQualityReportURL: URL?
     private var detectedAxisPresetIndex: Int = -1
     private var hasReadoutOverride: Bool = false
     private var detectedSignedReadoutMs: Double = 15.2
@@ -166,6 +167,20 @@ final class StabilizeViewController: UIViewController {
     private let motoActionLabel = UILabel()
     private let motoActionSwitch = UISwitch()
 
+    private let refineCalibLabel = UILabel()
+    private let refineCalibSwitch = UISwitch()
+    private let constrainedPathLabel = UILabel()
+    private let constrainedPathSwitch = UISwitch()
+    private let calibSummaryLabel: UILabel = {
+        let l = UILabel()
+        l.translatesAutoresizingMaskIntoConstraints = false
+        l.font = UIFont(name: "Menlo", size: 10.5) ?? UIFont.systemFont(ofSize: 10.5)
+        l.textColor = UIColor(red: 0.45, green: 0.88, blue: 1.0, alpha: 1.0)
+        l.numberOfLines = 0
+        l.text = "Closed-Loop Calib: Pending..."
+        return l
+    }()
+
     private let finishingHeaderLabel: UILabel = {
         let l = UILabel()
         l.translatesAutoresizingMaskIntoConstraints = false
@@ -184,6 +199,8 @@ final class StabilizeViewController: UIViewController {
     }()
     private let sharpenLabel = UILabel()
     private let sharpenSlider = UISlider()
+    private let temporalSharpenLabel = UILabel()
+    private let temporalSharpenSwitch = UISwitch()
     private let exportBitrateLabel = UILabel()
     private let exportBitrateControl: UISegmentedControl = {
         let sc = UISegmentedControl(items: ["25M", "35M", "42M"])
@@ -295,6 +312,19 @@ final class StabilizeViewController: UIViewController {
         return btn
     }()
 
+    private let shareQualityJsonButton: UIButton = {
+        let btn = UIButton(type: .system)
+        btn.translatesAutoresizingMaskIntoConstraints = false
+        btn.setTitle("DEBUG: EXPORT QUALITY JSON", for: .normal)
+        btn.setTitleColor(.white, for: .normal)
+        btn.titleLabel?.font = UIFont.systemFont(ofSize: 12, weight: .bold)
+        btn.backgroundColor = UIColor(red: 0.22, green: 0.28, blue: 0.38, alpha: 1.0)
+        btn.layer.cornerRadius = 8
+        btn.isEnabled = false
+        btn.alpha = 0.4
+        return btn
+    }()
+
     private let addQueueButton: UIButton = {
         let btn = UIButton(type: .system)
         btn.translatesAutoresizingMaskIntoConstraints = false
@@ -323,13 +353,22 @@ final class StabilizeViewController: UIViewController {
 
         configureControls()
         setupLayout()
+        loadCachedRefinedCalibration()
         updateSliderLabels()
         handlePreview()
         handleAutoSync()
     }
 
+    private func loadCachedRefinedCalibration() {
+        let calibURL = CaptureTakeStore.calibMetadataURL(for: take.uuid)
+        if let cal = GFRefinedCalibrationObjC.loadFromJSONPath(calibURL.path), cal.valid {
+            calibSummaryLabel.text = cal.summaryString
+            offsetSlider.value = Float(cal.offsetA)
+        }
+    }
+
     private func configureControls() {
-        for lbl in [pitchLabel, yawLabel, rollLabel, zoomLabel, dynamicZoomLabel, horizonLabel, tiltLabel, rsLabel, hybridResidualLabel, trans2DStrengthLabel, motoActionLabel, framingLabel, sharpenLabel, exportBitrateLabel, offsetLabel] {
+        for lbl in [pitchLabel, yawLabel, rollLabel, zoomLabel, dynamicZoomLabel, horizonLabel, tiltLabel, rsLabel, hybridResidualLabel, trans2DStrengthLabel, motoActionLabel, refineCalibLabel, constrainedPathLabel, framingLabel, sharpenLabel, temporalSharpenLabel, exportBitrateLabel, offsetLabel] {
             lbl.translatesAutoresizingMaskIntoConstraints = false
             lbl.font = UIFont(name: "Menlo-Bold", size: 11) ?? UIFont.systemFont(ofSize: 11, weight: .bold)
             lbl.textColor = .white
@@ -369,6 +408,18 @@ final class StabilizeViewController: UIViewController {
         motoActionSwitch.isOn = false
         motoActionSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
 
+        refineCalibSwitch.translatesAutoresizingMaskIntoConstraints = false
+        refineCalibSwitch.isOn = true
+        refineCalibSwitch.addTarget(self, action: #selector(handleRefineToggleChanged), for: .valueChanged)
+
+        constrainedPathSwitch.translatesAutoresizingMaskIntoConstraints = false
+        constrainedPathSwitch.isOn = true
+        constrainedPathSwitch.addTarget(self, action: #selector(handleRefineToggleChanged), for: .valueChanged)
+
+        temporalSharpenSwitch.translatesAutoresizingMaskIntoConstraints = false
+        temporalSharpenSwitch.isOn = true
+        temporalSharpenSwitch.addTarget(self, action: #selector(handleSliderChanged), for: .valueChanged)
+
         actionPresetButton.addTarget(self, action: #selector(handleActionModePreset), for: .touchUpInside)
         motoPresetButton.addTarget(self, action: #selector(handleMotoPovPreset), for: .touchUpInside)
         heavyJoltPresetButton.addTarget(self, action: #selector(handleHeavyJoltPreset), for: .touchUpInside)
@@ -382,6 +433,7 @@ final class StabilizeViewController: UIViewController {
         playButton.addTarget(self, action: #selector(handlePlay), for: .touchUpInside)
         savePhotosButton.addTarget(self, action: #selector(handleSavePhotos), for: .touchUpInside)
         shareButton.addTarget(self, action: #selector(handleShare), for: .touchUpInside)
+        shareQualityJsonButton.addTarget(self, action: #selector(handleShareQualityJson), for: .touchUpInside)
     }
 
     private func configureSlider(_ s: UISlider, min: Float, max: Float, val: Float) {
@@ -415,6 +467,9 @@ final class StabilizeViewController: UIViewController {
         let rsRow = makeSwitchRow(rsLabel, rsSwitch)
         let hybridRow = makeSwitchRow(hybridResidualLabel, hybridResidualSwitch)
         let motoRow = makeSwitchRow(motoActionLabel, motoActionSwitch)
+        let refineRow = makeSwitchRow(refineCalibLabel, refineCalibSwitch)
+        let constrainedRow = makeSwitchRow(constrainedPathLabel, constrainedPathSwitch)
+        let temporalSharpenRow = makeSwitchRow(temporalSharpenLabel, temporalSharpenSwitch)
 
         let stack = UIStackView(arrangedSubviews: [
             actionPresetButton,
@@ -423,6 +478,9 @@ final class StabilizeViewController: UIViewController {
             presetRow,
             autoSyncButton,
             autoSyncLabel,
+            refineRow,
+            calibSummaryLabel,
+            constrainedRow,
             pitchLabel,
             pitchSlider,
             yawLabel,
@@ -448,6 +506,7 @@ final class StabilizeViewController: UIViewController {
             framingControl,
             sharpenLabel,
             sharpenSlider,
+            temporalSharpenRow,
             exportBitrateLabel,
             exportBitrateControl,
             offsetLabel,
@@ -461,7 +520,8 @@ final class StabilizeViewController: UIViewController {
             addQueueButton,
             playButton,
             savePhotosButton,
-            shareButton
+            shareButton,
+            shareQualityJsonButton
         ])
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.axis = .vertical
@@ -497,7 +557,8 @@ final class StabilizeViewController: UIViewController {
             addQueueButton.heightAnchor.constraint(equalToConstant: 40),
             playButton.heightAnchor.constraint(equalToConstant: 42),
             savePhotosButton.heightAnchor.constraint(equalToConstant: 42),
-            shareButton.heightAnchor.constraint(equalToConstant: 42)
+            shareButton.heightAnchor.constraint(equalToConstant: 42),
+            shareQualityJsonButton.heightAnchor.constraint(equalToConstant: 38)
         ])
     }
 
@@ -537,7 +598,10 @@ final class StabilizeViewController: UIViewController {
             edgeFillMode: edgeFillMode,
             fovScaleBoost: fovBoost,
             sharpenStrength: Double(sharpenSlider.value),
-            exportBitrateMbps: bitrateMbps
+            exportBitrateMbps: bitrateMbps,
+            useRefinedCalibration: refineCalibSwitch.isOn,
+            useConstrainedPath: constrainedPathSwitch.isOn,
+            temporalSharpenEnabled: temporalSharpenSwitch.isOn
         )
     }
 
@@ -689,10 +753,13 @@ final class StabilizeViewController: UIViewController {
         trans2DStrengthSlider.isEnabled = hybridResidualSwitch.isOn && !motoActionSwitch.isOn
         trans2DStrengthSlider.alpha = trans2DStrengthSlider.isEnabled ? 1.0 : 0.4
         motoActionLabel.text = motoActionSwitch.isOn ? "MotoPOV Action Mode (42Hz/Far-ROI): ON" : "MotoPOV Action Mode: OFF"
+        refineCalibLabel.text = refineCalibSwitch.isOn ? "Closed-Loop Calib Refine (Per-Clip): ON" : "Closed-Loop Calib Refine: OFF (A/B)"
+        constrainedPathLabel.text = constrainedPathSwitch.isOn ? "Optimal L1 Path (Lookahead): ON" : "Optimal L1 Path: OFF (v1.5.2 A/B)"
         let framingNames = ["Dynamic Safe Crop", "Temporal Full-Frame (1.00x)", "Mirror Border (1.00x)"]
         let fIdx = max(0, min(2, framingControl.selectedSegmentIndex))
         framingLabel.text = "Framing: \(framingNames[fIdx])"
         sharpenLabel.text = String(format: "Adaptive Sharpening (CAS): %.0f%%", sharpenSlider.value * 100.0)
+        temporalSharpenLabel.text = temporalSharpenSwitch.isOn ? "Temporal Sharpen (Sub-1Hz Zoom LPF): ON" : "Temporal Sharpen: OFF (A/B)"
         let tierNames = ["Standard (25M CABAC)", "Cinema Pro (35M CABAC)", "Max A7 (42M Level 4.1)"]
         let bIdx = max(0, min(2, exportBitrateControl.selectedSegmentIndex))
         exportBitrateLabel.text = "Export Bitrate: \(tierNames[bIdx])"
@@ -718,6 +785,11 @@ final class StabilizeViewController: UIViewController {
         updateSliderLabels()
     }
 
+    @objc private func handleRefineToggleChanged() {
+        updateSliderLabels()
+        handlePreview()
+    }
+
     @objc private func handleAutoSync() {
         autoSyncButton.isEnabled = false
         autoSyncButton.alpha = 0.6
@@ -728,11 +800,6 @@ final class StabilizeViewController: UIViewController {
 
         pipeline.runAutoSync(take: take, motoActionMode: motoActionSwitch.isOn) { [weak self] result in
             guard let self = self else { return }
-            self.autoSyncButton.isEnabled = true
-            self.autoSyncButton.alpha = 1.0
-            self.renderButton.isEnabled = true
-            self.renderButton.alpha = 1.0
-
             switch result {
             case .success(let res):
                 if res.valid && res.bestNCC >= 0.35 {
@@ -745,7 +812,6 @@ final class StabilizeViewController: UIViewController {
                     self.updateSliderLabels()
                     self.autoSyncLabel.textColor = UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0)
                     self.autoSyncLabel.text = res.diagnosticMessage
-                    self.handlePreview()
                 } else {
                     self.autoSyncLabel.textColor = UIColor(red: 1.0, green: 0.78, blue: 0.25, alpha: 1.0)
                     self.autoSyncLabel.text = res.diagnosticMessage
@@ -753,6 +819,36 @@ final class StabilizeViewController: UIViewController {
             case .failure(let err):
                 self.autoSyncLabel.textColor = UIColor(red: 1.0, green: 0.45, blue: 0.45, alpha: 1.0)
                 self.autoSyncLabel.text = "Auto-Sync Error: \(err.localizedDescription)"
+            }
+
+            if self.refineCalibSwitch.isOn {
+                self.calibSummaryLabel.text = "Closed-Loop Calib: Refining full clip..."
+                self.pipeline.runCalibrationRefine(take: self.take, motoActionMode: self.motoActionSwitch.isOn) { [weak self] calRes in
+                    guard let self = self else { return }
+                    self.autoSyncButton.isEnabled = true
+                    self.autoSyncButton.alpha = 1.0
+                    self.renderButton.isEnabled = true
+                    self.renderButton.alpha = 1.0
+                    switch calRes {
+                    case .success(let cal):
+                        self.calibSummaryLabel.text = cal.summaryString
+                        if cal.valid && !cal.usedPriorFallback {
+                            self.detectedAxisPresetIndex = cal.axisPresetIndex
+                            self.offsetSlider.value = Float(cal.offsetA)
+                            self.updateSliderLabels()
+                        }
+                        self.handlePreview()
+                    case .failure(let err):
+                        self.calibSummaryLabel.text = "Calib Refine Error: \(err.localizedDescription)"
+                        self.handlePreview()
+                    }
+                }
+            } else {
+                self.autoSyncButton.isEnabled = true
+                self.autoSyncButton.alpha = 1.0
+                self.renderButton.isEnabled = true
+                self.renderButton.alpha = 1.0
+                self.handlePreview()
             }
         }
     }
@@ -794,6 +890,7 @@ final class StabilizeViewController: UIViewController {
 
         isRendering = true
         lastExportedURL = nil
+        lastQualityReportURL = nil
         savePhotosButton.setTitle("SAVE TO PHOTOS", for: .normal)
         savePhotosButton.backgroundColor = UIColor(red: 0.72, green: 0.42, blue: 0.12, alpha: 1.0)
         setResultButtonsEnabled(false)
@@ -827,8 +924,11 @@ final class StabilizeViewController: UIViewController {
                 switch result {
                 case .success(let res):
                     self.lastExportedURL = res.outputURL
+                    self.lastQualityReportURL = res.qualityReportURL
                     self.progressView.progress = 1.0
                     self.setResultButtonsEnabled(true)
+                    self.shareQualityJsonButton.isEnabled = (res.qualityReportURL != nil)
+                    self.shareQualityJsonButton.alpha = (res.qualityReportURL != nil) ? 1.0 : 0.4
                     self.statusLabel.textColor = UIColor(red: 0.35, green: 0.95, blue: 0.55, alpha: 1.0)
                     self.statusLabel.text = String(
                         format: "DONE! %d frames in %.1fs (%.1f fps)\nPeak RAM: %.1f MB | Gain: %.1f%% | 2D: %.1fpx (%lu ok)",
@@ -846,7 +946,7 @@ final class StabilizeViewController: UIViewController {
     }
 
     private func setResultButtonsEnabled(_ enabled: Bool) {
-        for btn in [playButton, savePhotosButton, shareButton] {
+        for btn in [playButton, savePhotosButton, shareButton, shareQualityJsonButton] {
             btn.isEnabled = enabled
             btn.alpha = enabled ? 1.0 : 0.4
         }
@@ -894,6 +994,16 @@ final class StabilizeViewController: UIViewController {
         if let pop = vc.popoverPresentationController {
             pop.sourceView = shareButton
             pop.sourceRect = shareButton.bounds
+        }
+        present(vc, animated: true, completion: nil)
+    }
+
+    @objc private func handleShareQualityJson() {
+        guard let url = lastQualityReportURL else { return }
+        let vc = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        if let pop = vc.popoverPresentationController {
+            pop.sourceView = shareQualityJsonButton
+            pop.sourceRect = shareQualityJsonButton.bounds
         }
         present(vc, animated: true, completion: nil)
     }

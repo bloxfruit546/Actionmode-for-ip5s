@@ -24,6 +24,42 @@ NS_ASSUME_NONNULL_BEGIN
 - (GFOpticalSyncResultObjC *)solveWithSidecarPath:(NSString *)sidecarPath motoActionMode:(BOOL)motoActionMode;
 @end
 
+@interface GFRefinedCalibrationObjC : NSObject
+@property (nonatomic, assign) BOOL valid;
+@property (nonatomic, assign) BOOL usedPriorFallback;
+@property (nonatomic, assign) NSInteger axisPresetIndex;
+@property (nonatomic, assign) double offsetA;
+@property (nonatomic, assign) double offsetB;
+@property (nonatomic, assign) double scaleX;
+@property (nonatomic, assign) double scaleY;
+@property (nonatomic, assign) double scaleZ;
+@property (nonatomic, assign) double biasX;
+@property (nonatomic, assign) double biasY;
+@property (nonatomic, assign) double biasZ;
+@property (nonatomic, assign) double readoutMs;
+@property (nonatomic, assign) double focalScale;
+@property (nonatomic, assign) double confidence;
+@property (nonatomic, assign) double residualRmsBefore;
+@property (nonatomic, assign) double residualRmsAfter;
+@property (nonatomic, copy) NSString *summaryString;
+- (BOOL)saveToJSONPath:(NSString *)path;
++ (nullable GFRefinedCalibrationObjC *)loadFromJSONPath:(NSString *)path;
+@end
+
+@interface GFCalibrationRefinerBridge : NSObject
+- (void)resetWithSidecarPath:(NSString *)sidecarPath
+                    hasPrior:(BOOL)hasPrior
+              priorReadoutMs:(double)priorReadoutMs
+             priorFocalScale:(double)priorFocalScale
+                 priorScaleX:(double)priorScaleX
+                 priorScaleY:(double)priorScaleY
+                 priorScaleZ:(double)priorScaleZ
+              motoActionMode:(BOOL)motoActionMode;
+- (void)pushLumaPixelBuffer:(CVPixelBufferRef)pixelBuffer timestampSec:(double)ts frameIndex:(NSUInteger)frameIndex;
+- (GFRefinedCalibrationObjC *)finalizeCalibration;
++ (double)medianOfNumbers:(NSArray<NSNumber *> *)values;
+@end
+
 @interface GFStabilizerPlanObjC : NSObject
 @property (nonatomic, assign) BOOL valid;
 @property (nonatomic, assign) NSUInteger frameCount;
@@ -48,6 +84,8 @@ NS_ASSUME_NONNULL_BEGIN
 @interface GFStabilizerBridge : NSObject
 
 @property (nonatomic, readonly) GFStabilizerPlanObjC *plan;
+@property (nonatomic, assign) BOOL chromaSitingFixEnabled;
+@property (nonatomic, assign) BOOL temporalSharpenEnabled;
 
 - (nullable instancetype)initWithSidecarPath:(NSString *)sidecarPath
                              pitchSmoothness:(double)pitchSmoothness
@@ -71,7 +109,10 @@ NS_ASSUME_NONNULL_BEGIN
                            motoActionMode:(BOOL)motoActionMode
                              edgeFillMode:(NSInteger)edgeFillMode
                             fovScaleBoost:(double)fovScaleBoost
-                          sharpenStrength:(double)sharpenStrength;
+                          sharpenStrength:(double)sharpenStrength
+                    useRefinedCalibration:(BOOL)useRefinedCalibration
+                         refinedCalibPath:(nullable NSString *)refinedCalibPath
+                       useConstrainedPath:(BOOL)useConstrainedPath;
 
 - (void)resetTranslational2DWithStrength:(double)strength;
 - (void)feedTranslational2DFrameIndex:(NSUInteger)frameIndex pixelBuffer:(CVPixelBufferRef)pixelBuffer;
@@ -80,6 +121,15 @@ NS_ASSUME_NONNULL_BEGIN
 - (BOOL)warpPixelBuffer:(CVPixelBufferRef)srcPixelBuffer
         intoPixelBuffer:(CVPixelBufferRef)dstPixelBuffer
              frameIndex:(NSUInteger)frameIndex;
+
+- (NSString *)computeQualityReportJSONWithClipName:(NSString *)clipName
+                                    inputPtsSec:(nullable NSArray<NSNumber *> *)inputPtsSec
+                                   outputPtsSec:(nullable NSArray<NSNumber *> *)outputPtsSec;
+
++ (NSString *)validatePtsSummaryWithInputPtsSec:(NSArray<NSNumber *> *)inputPtsSec
+                                   outputPtsSec:(NSArray<NSNumber *> *)outputPtsSec
+                                     nominalFps:(double)nominalFps
+                                         passed:(nullable BOOL *)outPassed;
 
 - (void)flushTextureCache;
 

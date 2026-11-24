@@ -1,18 +1,18 @@
-Start testing: Nov 21 17:22 SE Asia Standard Time
+Start testing: Nov 24 13:23 SE Asia Standard Time
 ----------------------------------------------------------
 1/5 Testing: gf_core_math_tests
 1/5 Test: gf_core_math_tests
 Command: "X:/GyroStabilizer5s/build_test/gf_core_tests.exe"
 Directory: X:/GyroStabilizer5s/build_test
-"gf_core_math_tests" start time: Nov 21 17:22 SE Asia Standard Time
+"gf_core_math_tests" start time: Nov 24 13:23 SE Asia Standard Time
 Output:
 ----------------------------------------------------------
 All CoreCPP math and sidecar tests passed.
 <end of output>
-Test time =   0.21 sec
+Test time =   0.02 sec
 ----------------------------------------------------------
 Test Passed.
-"gf_core_math_tests" end time: Nov 21 17:22 SE Asia Standard Time
+"gf_core_math_tests" end time: Nov 24 13:23 SE Asia Standard Time
 "gf_core_math_tests" time elapsed: 00:00:00
 ----------------------------------------------------------
 
@@ -20,15 +20,14 @@ Test Passed.
 2/5 Test: gf_sidecar_calib_tests
 Command: "X:/GyroStabilizer5s/build_test/gf_sidecar_calib_tests.exe"
 Directory: X:/GyroStabilizer5s/build_test
-"gf_sidecar_calib_tests" start time: Nov 21 17:22 SE Asia Standard Time
+"gf_sidecar_calib_tests" start time: Nov 24 13:23 SE Asia Standard Time
 Output:
 ----------------------------------------------------------
-All CoreCPP SidecarIO and Calibration tests passed.
 <end of output>
-Test time =   0.17 sec
+Test time =   0.02 sec
 ----------------------------------------------------------
-Test Passed.
-"gf_sidecar_calib_tests" end time: Nov 21 17:22 SE Asia Standard Time
+Test Failed.
+"gf_sidecar_calib_tests" end time: Nov 24 13:23 SE Asia Standard Time
 "gf_sidecar_calib_tests" time elapsed: 00:00:00
 ----------------------------------------------------------
 
@@ -36,85 +35,45 @@ Test Passed.
 3/5 Test: gf_stabilizer_tests
 Command: "X:/GyroStabilizer5s/build_test/gf_stabilizer_tests.exe"
 Directory: X:/GyroStabilizer5s/build_test
-"gf_stabilizer_tests" start time: Nov 21 17:22 SE Asia Standard Time
+"gf_stabilizer_tests" start time: Nov 24 13:23 SE Asia Standard Time
 Output:
 ----------------------------------------------------------
-traj.stabilityImprovementPct = 99.28%, rawRms=4.0711, smoothRms=0.0295
-Stabilizer test passed: StabilityGain=99.28%, Zoom=[1.136..1.370]
-testPureInterFrameGyroDeRotation PASSED: maxShiftPx = 0.305 px (< 0.35 px)
-testActionModeActionLevel40 (tilt +-25 deg -> rollErr=0.000 deg, zoom=1.28x) PASSED
-testActionModeActionLevel40 (tilt 65 deg -> maxCorr=25.0 deg, zoom=1.35x) PASSED
-testSoftKneeMarginClampingZeroEdgeBounce (+-12 deg @ 1.25x -> 0% border violation, smooth decel) PASSED
-Scenario 2 Landscape 0 deg: post-stabilization horizontal RMS = 0.0020 px (< 0.8 px)
-testHorizontalShakeSuppressionPortraitAndLandscape (Portrait 90 deg shake >92% & Landscape 0 deg RMS <0.8px) PASSED
 <end of output>
-Test time =   1.79 sec
+Test time =   0.02 sec
 ----------------------------------------------------------
-Test Passed.
-"gf_stabilizer_tests" end time: Nov 21 17:22 SE Asia Standard Time
-"gf_stabilizer_tests" time elapsed: 00:00:01
+Test Failed.
+"gf_stabilizer_tests" end time: Nov 24 13:23 SE Asia Standard Time
+"gf_stabilizer_tests" time elapsed: 00:00:00
 ----------------------------------------------------------
 
 4/5 Testing: gf_horizon_rs_autosync_tests
 4/5 Test: gf_horizon_rs_autosync_tests
 Command: "X:/GyroStabilizer5s/build_test/gf_horizon_rs_autosync_tests.exe"
 Directory: X:/GyroStabilizer5s/build_test
-"gf_horizon_rs_autosync_tests" start time: Nov 21 17:22 SE Asia Standard Time
+"gf_horizon_rs_autosync_tests" start time: Nov 24 13:23 SE Asia Standard Time
 Output:
 ----------------------------------------------------------
-Horizon/RS/AutoSync test passed: Auto-Sync: +17.4 ms | NCC: 0.991 | RS: +1.0 ms | Scale: 0.933x | Axis: LandscapeRight (+y,+x,-z)
-End-to-End Pixel Horizon Lock (30 deg -> -0.050 deg) PASSED.
-Centroid debug: src=(174.29, 101.53) out=(160.03, 90.04) exp=(160.04, 90.06) err=0.023 px, stability=99.50%
-End-to-End Pixel Stabilization Centroid (err=0.023 px) PASSED.
-End-to-End Pixel Portrait 90 Horizon Lock (35 deg -> 0.075 deg) PASSED.
-Test A (Violent 0.75g Lateral Shake -> maxOutRollErr=0.000 deg) PASSED.
-Test B (Violent 3.8rad/s Shake -> panRatio=0.033, Gain=99.50%) PASSED.
-Test C debug: signedRS=-13.0 ms (hasEst=1), residual=1.072 px
-Test H debug: detectedMax=21.00 px, maxResidualPx=1.34 px, mid=(true=11.76, shift=-12.41)
-Test C (Signed Readout=-15.2ms -> Detected -13.0 ms, residual=1.072 px) PASSED.
-Test D (Portrait->Landscape 90deg UltraGimbal -> maxOutRollErr=0.005 deg, Zoom=[1.01..2.06]) PASSED.
-Fast-Pan Swing-Lag Limit (maxCorr=24.45 deg, maxZoom=4.00x, w>0.25) PASSED.
-Phase 5 FocalScale=1.055x (true=1.070x) | 35Hz MEMS Residual=0.002 px PASSED.
-VirtualGyro RANSAC Moving-Object Immunity (estWy=0.245 vs true=0.240 rad/s, inlier=99.8%) PASSED.
-Test G (+-18 deg @ 5Hz Heavy Shake -> panRatio=0.013, swingCap=24.5 deg, outErr=0.053 deg, maxZoom=2.20x) PASSED.
-Test H (Hybrid Optical Residual +-20px @ 6Hz Bounce -> detectedMax=21.00 px, residual=1.34 px, maxZoom=1.05x) PASSED.
-Test Moto 1 maxTrueRollErrDeg = 0.0058 deg
-Test Moto 1 (30 deg Lean + 1.15g Centripetal 5s Turn -> maxTrueRollErr=0.006 deg, yawEnd=83.2 deg) PASSED.
-Test Moto 2 (Far-Field ROI NCC=0.928 | 16deg Pothole + 32Hz Buzz -> pitchErr=0.123 deg, 64-Slice RS) PASSED.
-Test Classroom v1.1.0 (IntroZoom[0..0.75s]=1.011x <= 1.05x | RollErr(90/45 deg)=0.000 deg | fx=1815) PASSED.
-Test Phase 7.2 v1.2.0 (ZoomPeak=1.513x -> +125ms=1.513x, +1.0s=1.488x | Portrait 1080x1920 fx-upgrade NCC=0.994, scale=0.981x) PASSED.
-Test Phase A 720p60 (90Hz IMU / 60fps Video -> NCC=0.981, Gain=99.50%, Zoom=[1.17x..1.25x], 0% black border) PASSED.
-Test Phase B 160x90 2D (3D+-10deg + 2D+-12px@3Hz + MovingObj -> valid=59/59, residual=1.67 px, Zoom=1.40x, 0% black border) PASSED.
 <end of output>
-Test time =  20.35 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
-Test Passed.
-"gf_horizon_rs_autosync_tests" end time: Nov 21 17:22 SE Asia Standard Time
-"gf_horizon_rs_autosync_tests" time elapsed: 00:00:20
+Test Failed.
+"gf_horizon_rs_autosync_tests" end time: Nov 24 13:23 SE Asia Standard Time
+"gf_horizon_rs_autosync_tests" time elapsed: 00:00:00
 ----------------------------------------------------------
 
 5/5 Testing: gf_quality_metrics_tests
 5/5 Test: gf_quality_metrics_tests
 Command: "X:/GyroStabilizer5s/build_test/gf_quality_metrics_tests.exe"
 Directory: X:/GyroStabilizer5s/build_test
-"gf_quality_metrics_tests" start time: Nov 21 17:22 SE Asia Standard Time
+"gf_quality_metrics_tests" start time: Nov 24 13:23 SE Asia Standard Time
 Output:
 ----------------------------------------------------------
-Quality Test 1 (Identity PSNR=57.94 dB, SSIM=0.99994 | +12.5deg Single-Pass PSNR=58.99 dB, SSIM=0.9999) PASSED.
-Quality Test 2 (Temporal Edge Fill @ Zoom=1.00x -> 18560 border px filled, 0 black px, Border PSNR=85.07 dB) PASSED.
-
-=== FINAL CINEMA MASTER v1.0.0 BENCHMARK SCORECARD ===
-  Stability Score:            99.50%
-  Mean / Max Cropping Ratio:  63.1% / 63.7% (Zoom avg=1.65x, max=1.66x)
-  Residual Horizon Tilt Err:  0.000 deg
-  Single-Pass Resampling:     PSNR=58.99 dB | SSIM=0.9999
-=======================================================
 <end of output>
-Test time =   3.34 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
-Test Passed.
-"gf_quality_metrics_tests" end time: Nov 21 17:22 SE Asia Standard Time
-"gf_quality_metrics_tests" time elapsed: 00:00:03
+Test Failed.
+"gf_quality_metrics_tests" end time: Nov 24 13:23 SE Asia Standard Time
+"gf_quality_metrics_tests" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-End testing: Nov 21 17:22 SE Asia Standard Time
+End testing: Nov 24 13:23 SE Asia Standard Time

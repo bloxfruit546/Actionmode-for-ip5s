@@ -17,6 +17,20 @@ final class TakeDetailViewController: UIViewController {
         return v
     }()
 
+    private let dropWarningLabel: UILabel = {
+        let l = UILabel()
+        l.translatesAutoresizingMaskIntoConstraints = false
+        l.font = UIFont(name: "Menlo-Bold", size: 11) ?? UIFont.systemFont(ofSize: 11, weight: .bold)
+        l.textColor = UIColor(red: 1.0, green: 0.85, blue: 0.30, alpha: 1.0)
+        l.backgroundColor = UIColor(red: 0.45, green: 0.14, blue: 0.05, alpha: 1.0)
+        l.textAlignment = .center
+        l.numberOfLines = 0
+        l.layer.cornerRadius = 6
+        l.clipsToBounds = true
+        l.isHidden = true
+        return l
+    }()
+
     private let summaryTextView: UITextView = {
         let tv = UITextView()
         tv.translatesAutoresizingMaskIntoConstraints = false
@@ -91,6 +105,7 @@ final class TakeDetailViewController: UIViewController {
         scrollView.addSubview(contentView)
 
         let stack = UIStackView(arrangedSubviews: [
+            dropWarningLabel,
             summaryTextView,
             stabilizeButton,
             playButton,
@@ -119,7 +134,7 @@ final class TakeDetailViewController: UIViewController {
             stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
             stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -28),
 
-            summaryTextView.heightAnchor.constraint(equalToConstant: 265),
+            summaryTextView.heightAnchor.constraint(equalToConstant: 285),
             stabilizeButton.heightAnchor.constraint(equalToConstant: 46),
             playButton.heightAnchor.constraint(equalToConstant: 42),
             shareButton.heightAnchor.constraint(equalToConstant: 42)
@@ -137,6 +152,36 @@ final class TakeDetailViewController: UIViewController {
         let minShutterDenom = (s.minExposureMs > 0.01) ? (1000.0 / s.minExposureMs) : 0.0
         let maxShutterDenom = (s.maxExposureMs > 0.01) ? (1000.0 / s.maxExposureMs) : 0.0
 
+        let aux = CaptureTakeStore.loadAuxMetadata(for: take.uuid)
+        let hwDrops = aux?.hardwareDroppedFrames ?? 0
+        let wrDrops = aux?.writerDroppedFrames ?? 0
+        let totalDrops = UInt64(s.droppedFrames) + UInt64(hwDrops) + UInt64(wrDrops)
+        if totalDrops > 0 {
+            dropWarningLabel.text = String(
+                format: "⚠ WARNING: %llu Dropped Frames (didDrop=%u, Writer=%u, PTSGap=%u) — sync/smoothness may be affected.",
+                totalDrops, hwDrops, wrDrops, s.droppedFrames
+            )
+            dropWarningLabel.isHidden = false
+        } else {
+            dropWarningLabel.isHidden = true
+        }
+
+        let lockInfo: String
+        if let meta = aux {
+            let wb = meta.lockedWhiteBalanceGains
+            let wbStr = (wb.count == 3)
+                ? String(format: "(%.2f, %.2f, %.2f)", wb[0], wb[1], wb[2])
+                : "Auto/Prior"
+            lockInfo = String(
+                format: "%@ | Lens=%.3f | WB=%@",
+                meta.focusAndWbLockedOnRecord ? "LOCKED" : "AUTO",
+                meta.lockedLensPosition,
+                wbStr
+            )
+        } else {
+            lockInfo = "Legacy (no .meta.json)"
+        }
+
         summaryTextView.text = String(format: """
         Take UUID     : %@
         Source        : %@
@@ -149,11 +194,12 @@ final class TakeDetailViewController: UIViewController {
         Duration      : %.2f s
         Readout Time  : %.2f ms
         Gyro Bias     : (%+.5f, %+.5f, %+.5f)
+        Rec Locks     : %@
         ----------------------------------------
         Gyro Samples  : %llu (%.2f Hz)
         Accel Samples : %llu (%.2f Hz)
         Video Frames  : %llu (avg %.2f fps)
-        Dropped Frames: %u
+        Dropped Frames: %llu (PTS gap=%u, HW didDrop=%u, Writer=%u)
         Exposure Range: %.2f .. %.2f ms (1/%.0f .. 1/%.0f s)
         Sync Coverage : %@
         Error         : %@
@@ -168,10 +214,11 @@ final class TakeDetailViewController: UIViewController {
         s.recordingDurationSec,
         s.readoutTimeSec * 1000.0,
         s.gyroBiasX, s.gyroBiasY, s.gyroBiasZ,
+        lockInfo,
         s.gyroCount, s.gyroHz,
         s.accelCount, s.accelHz,
         s.frameCount, s.avgFps,
-        s.droppedFrames,
+        totalDrops, s.droppedFrames, hwDrops, wrDrops,
         s.minExposureMs, s.maxExposureMs, minShutterDenom, maxShutterDenom,
         s.syncCoverageOk ? "PASS" : "WARN",
         s.errorMessage.isEmpty ? "None" : s.errorMessage)

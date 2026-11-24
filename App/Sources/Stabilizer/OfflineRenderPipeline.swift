@@ -29,6 +29,12 @@ struct StabilizeExportConfig: Codable {
     let fovScaleBoost: Double
     let sharpenStrength: Double
     let exportBitrateMbps: Int
+    let exportQualityReportEnabled: Bool
+    let chromaSitingFixEnabled: Bool
+    let verifyOutputPtsEnabled: Bool
+    let useRefinedCalibration: Bool
+    let useConstrainedPath: Bool
+    let temporalSharpenEnabled: Bool
 
     init(
         pitchSmoothness: Double,
@@ -54,7 +60,13 @@ struct StabilizeExportConfig: Codable {
         edgeFillMode: Int = 0,
         fovScaleBoost: Double = 1.0,
         sharpenStrength: Double = 0.45,
-        exportBitrateMbps: Int = 35
+        exportBitrateMbps: Int = 35,
+        exportQualityReportEnabled: Bool = true,
+        chromaSitingFixEnabled: Bool = true,
+        verifyOutputPtsEnabled: Bool = true,
+        useRefinedCalibration: Bool = true,
+        useConstrainedPath: Bool = true,
+        temporalSharpenEnabled: Bool = true
     ) {
         self.pitchSmoothness = pitchSmoothness
         self.yawSmoothness = yawSmoothness
@@ -80,6 +92,12 @@ struct StabilizeExportConfig: Codable {
         self.fovScaleBoost = fovScaleBoost
         self.sharpenStrength = sharpenStrength
         self.exportBitrateMbps = exportBitrateMbps
+        self.exportQualityReportEnabled = exportQualityReportEnabled
+        self.chromaSitingFixEnabled = chromaSitingFixEnabled
+        self.verifyOutputPtsEnabled = verifyOutputPtsEnabled
+        self.useRefinedCalibration = useRefinedCalibration
+        self.useConstrainedPath = useConstrainedPath
+        self.temporalSharpenEnabled = temporalSharpenEnabled
     }
 
     init(from decoder: Decoder) throws {
@@ -108,11 +126,18 @@ struct StabilizeExportConfig: Codable {
         fovScaleBoost = (try? c.decodeIfPresent(Double.self, forKey: .fovScaleBoost)) ?? 1.0
         sharpenStrength = (try? c.decodeIfPresent(Double.self, forKey: .sharpenStrength)) ?? 0.45
         exportBitrateMbps = (try? c.decodeIfPresent(Int.self, forKey: .exportBitrateMbps)) ?? 35
+        exportQualityReportEnabled = (try? c.decodeIfPresent(Bool.self, forKey: .exportQualityReportEnabled)) ?? true
+        chromaSitingFixEnabled = (try? c.decodeIfPresent(Bool.self, forKey: .chromaSitingFixEnabled)) ?? true
+        verifyOutputPtsEnabled = (try? c.decodeIfPresent(Bool.self, forKey: .verifyOutputPtsEnabled)) ?? true
+        useRefinedCalibration = (try? c.decodeIfPresent(Bool.self, forKey: .useRefinedCalibration)) ?? true
+        useConstrainedPath = (try? c.decodeIfPresent(Bool.self, forKey: .useConstrainedPath)) ?? true
+        temporalSharpenEnabled = (try? c.decodeIfPresent(Bool.self, forKey: .temporalSharpenEnabled)) ?? true
     }
 }
 
 struct StabilizeExportResult {
     let outputURL: URL
+    let qualityReportURL: URL?
     let plan: GFStabilizerPlanObjC
     let renderedFrames: Int
     let elapsedSeconds: Double
@@ -220,10 +245,104 @@ final class OfflineRenderPipeline {
         }
     }
 
+    func runCalibrationRefine(
+        take: CaptureTake,
+        motoActionMode: Bool = false,
+        completion: @escaping (Result<GFRefinedCalibrationObjC, Error>) -> Void
+    ) {
+        setupQueue.async { [weak self] in
+            guard let self = self else { return }
+            do {
+                let cal = try self.runCalibrationRefineSync(take: take, motoActionMode: motoActionMode)
+                DispatchQueue.main.async {
+                    completion(.success(cal))
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    private func runCalibrationRefineSync(take: CaptureTake, motoActionMode: Bool) throws -> GFRefinedCalibrationObjC {
+        let startTime = CFAbsoluteTimeGetCurrent()
+        let asset = AVURLAsset(url: take.movURL)
+        guard let videoTrack = asset.tracks(withMediaType: .video).first else {
+            throw makeError("No video track found for CalibrationRefiner.")
+        }
+        let summary = GFSidecarReaderBridge.inspectFile(atPath: take.sidecarURL.path)
+        let prior = CalibrationManager.shared.priorForMode(summary.captureMode)
+
+        let reader = try AVAssetReader(asset: asset)
+        let outputSettings: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+        ]
+        let trackOut = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: outputSettings)
+        trackOut.alwaysCopiesSampleData = false
+        guard reader.canAdd(trackOut) else {
+            throw makeError("AVAssetReader cannot add video output for CalibrationRefiner.")
+        }
+        reader.add(trackOut)
+        guard reader.startReading() else {
+            throw makeError("AVAssetReader failed to start for CalibrationRefiner.")
+        }
+
+        let refiner = GFCalibrationRefinerBridge()
+        refiner.reset(
+            withSidecarPath: take.sidecarURL.path,
+            hasPrior: prior.hasPrior,
+            priorReadoutMs: prior.readoutMs,
+            priorFocalScale: prior.focalScale,
+            priorScaleX: prior.scaleX,
+            priorScaleY: prior.scaleY,
+            priorScaleZ: prior.scaleZ,
+            motoActionMode: motoActionMode
+        )
+
+        var idx: UInt = 0
+        while true {
+            var reachedEnd = false
+            autoreleasepool {
+                guard let sample = trackOut.copyNextSampleBuffer() else {
+                    reachedEnd = true
+                    return
+                }
+                if let pb = CMSampleBufferGetImageBuffer(sample) {
+                    let pts = CMTimeGetSeconds(CMSampleBufferGetPresentationTimeStamp(sample))
+                    refiner.pushLumaPixelBuffer(pb, timestampSec: pts, frameIndex: idx)
+                    idx += 1
+                }
+            }
+            if reachedEnd { break }
+        }
+        reader.cancelReading()
+
+        let result = refiner.finalizeCalibration()
+        if result.valid {
+            let calibURL = CaptureTakeStore.calibMetadataURL(for: take.uuid)
+            _ = result.save(toJSONPath: calibURL.path)
+            if result.confidence >= 0.72 && !result.usedPriorFallback {
+                CalibrationManager.shared.recordRefinedPrior(
+                    captureMode: summary.captureMode,
+                    readoutMs: result.readoutMs,
+                    focalScale: result.focalScale,
+                    scaleX: result.scaleX,
+                    scaleY: result.scaleY,
+                    scaleZ: result.scaleZ
+                )
+            }
+        }
+        let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+        FileLogger.shared.log(String(format: "CalibrationRefiner completed in %.2fs (%lu frames): %@", elapsed, idx, result.summaryString))
+        return result
+    }
+
     func computePlanPreview(take: CaptureTake, config: StabilizeExportConfig) -> GFStabilizerPlanObjC? {
         let asset = AVURLAsset(url: take.movURL)
         let rotDeg = asset.tracks(withMediaType: .video).first.map { Self.videoRotationDegrees(from: $0.preferredTransform) } ?? 0
-        let bridge = makeBridge(sidecarPath: take.sidecarURL.path, config: config, videoRotationDegrees: rotDeg)
+        let calibPath = CaptureTakeStore.calibMetadataURL(for: take.uuid).path
+        let bridge = makeBridge(sidecarPath: take.sidecarURL.path, refinedCalibPath: calibPath, config: config, videoRotationDegrees: rotDeg)
         return bridge?.plan
     }
 
@@ -253,8 +372,15 @@ final class OfflineRenderPipeline {
                 return
             }
             let rotDeg = Self.videoRotationDegrees(from: videoTrack.preferredTransform)
+            let calibURL = CaptureTakeStore.calibMetadataURL(for: take.uuid)
+            if config.useRefinedCalibration && !FileManager.default.fileExists(atPath: calibURL.path) {
+                DispatchQueue.main.async {
+                    statusUpdate?("Refining per-clip calibration...")
+                }
+                _ = try? self.runCalibrationRefineSync(take: take, motoActionMode: config.motoActionMode)
+            }
 
-            guard let bridge = self.makeBridge(sidecarPath: take.sidecarURL.path, config: config, videoRotationDegrees: rotDeg) else {
+            guard let bridge = self.makeBridge(sidecarPath: take.sidecarURL.path, refinedCalibPath: calibURL.path, config: config, videoRotationDegrees: rotDeg) else {
                 DispatchQueue.main.async {
                     completion(.failure(self.makeError("Failed to initialize GFStabilizerBridge.")))
                 }
@@ -397,6 +523,8 @@ final class OfflineRenderPipeline {
                 var lastLoggedDecile = -1
                 var peakRamMB = Double(GFSystemProbe.currentPhysFootprintBytes()) / (1024.0 * 1024.0)
                 var renderError: Error?
+                var inputPtsList: [Double] = []
+                inputPtsList.reserveCapacity(totalFrames)
 
                 let finishVideoOnce: (Error?) -> Void = { err in
                     stateLock.lock()
@@ -490,6 +618,7 @@ final class OfflineRenderPipeline {
                                 return
                             }
 
+                            inputPtsList.append(CMTimeGetSeconds(pts))
                             frameIndex += 1
                             let ramMB = Double(GFSystemProbe.currentPhysFootprintBytes()) / (1024.0 * 1024.0)
                             if ramMB > peakRamMB {
@@ -587,8 +716,43 @@ final class OfflineRenderPipeline {
                     writer.finishWriting {
                         if writer.status == .completed {
                             let elapsed = CFAbsoluteTimeGetCurrent() - startTime
+                            let nsInPts = inputPtsList.map { NSNumber(value: $0) }
+                            var nsOutPts = nsInPts
+                            if config.verifyOutputPtsEnabled {
+                                let muxedPts = Self.collectOutputVideoPts(url: outURL)
+                                if !muxedPts.isEmpty {
+                                    nsOutPts = muxedPts.map { NSNumber(value: $0) }
+                                }
+                                var ptsOk: ObjCBool = false
+                                let ptsSummary = GFStabilizerBridge.validatePtsSummary(
+                                    withInputPtsSec: nsInPts,
+                                    outputPtsSec: nsOutPts,
+                                    nominalFps: plan.nominalFps > 1 ? plan.nominalFps : 30.0,
+                                    passed: &ptsOk
+                                )
+                                FileLogger.shared.log(ptsSummary)
+                            }
+                            var qualityURL: URL? = nil
+                            if config.exportQualityReportEnabled {
+                                let jsonStr = bridge.computeQualityReportJSON(
+                                    withClipName: take.uuid,
+                                    inputPtsSec: nsInPts,
+                                    outputPtsSec: nsOutPts
+                                )
+                                let qURL = Self.stabilizedDirectory.appendingPathComponent("\(take.uuid)_quality.json")
+                                if let qData = jsonStr.data(using: .utf8) {
+                                    do {
+                                        try qData.write(to: qURL, options: .atomic)
+                                        qualityURL = qURL
+                                        FileLogger.shared.log("Quality Report saved: \(qURL.lastPathComponent)")
+                                    } catch {
+                                        FileLogger.shared.log("WARN: Failed to save quality report: \(error.localizedDescription)")
+                                    }
+                                }
+                            }
                             let res = StabilizeExportResult(
                                 outputURL: outURL,
+                                qualityReportURL: qualityURL,
                                 plan: plan,
                                 renderedFrames: frameIndex,
                                 elapsedSeconds: elapsed,
@@ -624,6 +788,38 @@ final class OfflineRenderPipeline {
 
     static func saveVideoToPhotos(url: URL, from viewController: UIViewController? = nil, completion: @escaping (Result<Void, Error>) -> Void) {
         PhotosSaver.shared.saveVideoToPhotos(videoURL: url, from: viewController, completion: completion)
+    }
+
+    private static func collectOutputVideoPts(url: URL) -> [Double] {
+        let outAsset = AVURLAsset(url: url)
+        guard let vTrack = outAsset.tracks(withMediaType: .video).first,
+              let reader = try? AVAssetReader(asset: outAsset) else {
+            return []
+        }
+        // Packet-header read (outputSettings: nil) avoids decoding frames; sort for B-frame reorder presentation order.
+        let trackOut = AVAssetReaderTrackOutput(track: vTrack, outputSettings: nil)
+        trackOut.alwaysCopiesSampleData = false
+        guard reader.canAdd(trackOut) else { return [] }
+        reader.add(trackOut)
+        guard reader.startReading() else { return [] }
+
+        var ptsSec: [Double] = []
+        while true {
+            var done = false
+            autoreleasepool {
+                guard let sample = trackOut.copyNextSampleBuffer() else {
+                    done = true
+                    return
+                }
+                let t = CMSampleBufferGetPresentationTimeStamp(sample)
+                if t.isValid && !t.isIndefinite {
+                    ptsSec.append(CMTimeGetSeconds(t))
+                }
+            }
+            if done { break }
+        }
+        reader.cancelReading()
+        return ptsSec.sorted()
     }
 
     private func runTranslational2DPass(
@@ -680,8 +876,8 @@ final class OfflineRenderPipeline {
         }
     }
 
-    private func makeBridge(sidecarPath: String, config: StabilizeExportConfig, videoRotationDegrees: Int) -> GFStabilizerBridge? {
-        return GFStabilizerBridge(
+    private func makeBridge(sidecarPath: String, refinedCalibPath: String?, config: StabilizeExportConfig, videoRotationDegrees: Int) -> GFStabilizerBridge? {
+        let bridge = GFStabilizerBridge(
             sidecarPath: sidecarPath,
             pitchSmoothness: config.pitchSmoothness,
             yawSmoothness: config.yawSmoothness,
@@ -704,8 +900,14 @@ final class OfflineRenderPipeline {
             motoActionMode: config.motoActionMode,
             edgeFillMode: config.edgeFillMode,
             fovScaleBoost: config.fovScaleBoost,
-            sharpenStrength: config.sharpenStrength
+            sharpenStrength: config.sharpenStrength,
+            useRefinedCalibration: config.useRefinedCalibration,
+            refinedCalibPath: refinedCalibPath,
+            useConstrainedPath: config.useConstrainedPath
         )
+        bridge?.chromaSitingFixEnabled = config.chromaSitingFixEnabled
+        bridge?.temporalSharpenEnabled = config.temporalSharpenEnabled
+        return bridge
     }
 
     private func makeError(_ message: String) -> NSError {

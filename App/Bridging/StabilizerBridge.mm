@@ -1,7 +1,9 @@
 #import "StabilizerBridge.h"
 #import "CalibrationProfile.hpp"
+#import "CalibrationRefiner.hpp"
 #import "FrameWarpCalculator.hpp"
 #import "OpticalSync.hpp"
+#import "QualityMetrics.hpp"
 #import "SidecarIO.hpp"
 #import "TrajectoryEngine.hpp"
 #import "TranslationalStabilizer2D.hpp"
@@ -30,6 +32,9 @@ struct GFWarpFrameUniformsMetal {
     simd_float4 intrinsics;
     simd_float4 distortion;
 };
+
+static_assert(sizeof(GFWarpFrameUniformsMetal) == (64 * 48 + 3 * 48 + 16 * 4 + 8 * 4),
+              "GFWarpFrameUniformsMetal layout must match WarpPass.metal WarpFrameUniforms");
 
 struct GFHistSlot {
     CVPixelBufferRef pb = nullptr;
@@ -142,6 +147,147 @@ struct GFHistSlot {
 
 @end
 
+@implementation GFRefinedCalibrationObjC {
+    gf::RefinedCalibration _cpp;
+}
+
+- (instancetype)init {
+    self = [super init];
+    if (self) {
+        _summaryString = @"";
+    }
+    return self;
+}
+
+- (void)populateFromCpp:(const gf::RefinedCalibration &)c {
+    _cpp = c;
+    self.valid = c.valid ? YES : NO;
+    self.usedPriorFallback = c.usedPriorFallback ? YES : NO;
+    self.axisPresetIndex = c.axisPresetIndex;
+    self.offsetA = c.offsetA;
+    self.offsetB = c.offsetB;
+    self.scaleX = c.scale[0];
+    self.scaleY = c.scale[1];
+    self.scaleZ = c.scale[2];
+    self.biasX = c.bias[0];
+    self.biasY = c.bias[1];
+    self.biasZ = c.bias[2];
+    self.readoutMs = c.readoutMs;
+    self.focalScale = c.focalScale;
+    self.confidence = c.confidence;
+    self.residualRmsBefore = c.residualRmsBefore;
+    self.residualRmsAfter = c.residualRmsAfter;
+    self.summaryString = [NSString stringWithFormat:
+        @"Calib%@: off=%+.2fms%+.2fms/s | scale=(%.3f,%.3f,%.3f) | RS=%.2fms | F=%.3fx | conf=%.2f | RMS %.4f->%.4f",
+        c.usedPriorFallback ? @"[Prior]" : @"",
+        c.offsetA, c.offsetB,
+        c.scale[0], c.scale[1], c.scale[2],
+        c.readoutMs, c.focalScale, c.confidence,
+        c.residualRmsBefore, c.residualRmsAfter];
+}
+
+- (BOOL)saveToJSONPath:(NSString *)path {
+    if (!path || !_cpp.valid) return NO;
+    return gf::RefinedCalibration::saveJsonFile([path UTF8String], _cpp) ? YES : NO;
+}
+
++ (nullable GFRefinedCalibrationObjC *)loadFromJSONPath:(NSString *)path {
+    if (!path) return nil;
+    gf::RefinedCalibration c;
+    if (!gf::RefinedCalibration::loadJsonFile([path UTF8String], c) || !c.valid) {
+        return nil;
+    }
+    GFRefinedCalibrationObjC *obj = [[GFRefinedCalibrationObjC alloc] init];
+    [obj populateFromCpp:c];
+    return obj;
+}
+
+@end
+
+@implementation GFCalibrationRefinerBridge {
+    gf::CalibrationRefiner _refiner;
+    BOOL _ready;
+    std::vector<uint8_t> _scratchDs;
+}
+
+- (void)resetWithSidecarPath:(NSString *)sidecarPath
+                    hasPrior:(BOOL)hasPrior
+              priorReadoutMs:(double)priorReadoutMs
+             priorFocalScale:(double)priorFocalScale
+                 priorScaleX:(double)priorScaleX
+                 priorScaleY:(double)priorScaleY
+                 priorScaleZ:(double)priorScaleZ
+              motoActionMode:(BOOL)motoActionMode {
+    gf::GFFileHeader hdr{};
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    std::vector<gf::GFFrameRecord> scFrames;
+    gf::SidecarSummary summary;
+
+    _ready = NO;
+    if (!gf::SidecarReader::readAll([sidecarPath UTF8String], hdr, gyro, accel, scFrames, summary) ||
+        !summary.validHeader) {
+        return;
+    }
+
+    gf::CalibrationModePrior prior;
+    prior.hasPrior = hasPrior ? true : false;
+    prior.readoutMs = priorReadoutMs;
+    prior.focalScale = priorFocalScale;
+    prior.scale[0] = priorScaleX;
+    prior.scale[1] = priorScaleY;
+    prior.scale[2] = priorScaleZ;
+
+    _refiner.reset(hdr, gyro, scFrames, &prior, nullptr, motoActionMode ? true : false);
+    _ready = YES;
+}
+
+- (void)pushLumaPixelBuffer:(CVPixelBufferRef)pixelBuffer timestampSec:(double)ts frameIndex:(NSUInteger)frameIndex {
+    if (!_ready || !pixelBuffer) return;
+    CVPixelBufferLockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+    const size_t srcW = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0);
+    const size_t srcH = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0);
+    const size_t stride = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0);
+    const uint8_t *base = (const uint8_t *)CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0);
+
+    if (base && srcW >= 64 && srcH >= 64) {
+        const int ds = 4;
+        const int dstW = (int)(srcW / ds);
+        const int dstH = (int)(srcH / ds);
+        _scratchDs.resize((size_t)(dstW * dstH));
+        for (int y = 0; y < dstH; ++y) {
+            const uint8_t *srcRow = base + (size_t)(y * ds) * stride;
+            uint8_t *dstRow = _scratchDs.data() + (size_t)(y * dstW);
+            for (int x = 0; x < dstW; ++x) {
+                dstRow[x] = srcRow[x * ds];
+            }
+        }
+        _refiner.pushDownsampledLumaFrame(_scratchDs.data(), dstW, dstH, ts, (size_t)frameIndex);
+    }
+    CVPixelBufferUnlockBaseAddress(pixelBuffer, kCVPixelBufferLock_ReadOnly);
+}
+
+- (GFRefinedCalibrationObjC *)finalizeCalibration {
+    GFRefinedCalibrationObjC *out = [[GFRefinedCalibrationObjC alloc] init];
+    if (!_ready) {
+        return out;
+    }
+    const gf::RefinedCalibration c = _refiner.finalize();
+    [out populateFromCpp:c];
+    return out;
+}
+
++ (double)medianOfNumbers:(NSArray<NSNumber *> *)values {
+    std::vector<double> vec;
+    vec.reserve(values.count);
+    for (NSNumber *n in values) {
+        vec.push_back([n doubleValue]);
+    }
+    return gf::CalibrationRefiner::computeMedian(std::move(vec));
+}
+
+@end
+
 @implementation GFStabilizerPlanObjC
 - (instancetype)init {
     self = [super init];
@@ -174,12 +320,22 @@ struct GFHistSlot {
     gf::EdgeFillMode _edgeFillMode;
     double _fovScaleBoost;
     double _sharpenStrength;
+    std::vector<double> _sharpenZoomLPF;
     GFHistSlot _histSlots[3];
     GFStabilizerPlanObjC *_plan;
 }
 
 - (GFStabilizerPlanObjC *)plan {
     return _plan;
+}
+
+- (void)rebuildSharpenZoomLPF {
+    std::vector<double> rawZoom(_frameLUTs.size(), 1.0);
+    for (size_t i = 0; i < _frameLUTs.size(); ++i) {
+        rawZoom[i] = static_cast<double>(_frameLUTs[i].zoomUsed);
+    }
+    const double effFps = (_fps > 1.0) ? _fps : 30.0;
+    _sharpenZoomLPF = gf::QualityMetrics::lowPassFilterZoomSub1Hz(rawZoom, effFps, 0.65);
 }
 
 - (void)releaseHistoryBuffers {
@@ -222,12 +378,17 @@ struct GFHistSlot {
                            motoActionMode:(BOOL)motoActionMode
                              edgeFillMode:(NSInteger)edgeFillMode
                             fovScaleBoost:(double)fovScaleBoost
-                          sharpenStrength:(double)sharpenStrength {
+                          sharpenStrength:(double)sharpenStrength
+                    useRefinedCalibration:(BOOL)useRefinedCalibration
+                         refinedCalibPath:(nullable NSString *)refinedCalibPath
+                       useConstrainedPath:(BOOL)useConstrainedPath {
     self = [super init];
     if (!self) {
         return nil;
     }
 
+    _chromaSitingFixEnabled = YES;
+    _temporalSharpenEnabled = YES;
     _plan = [[GFStabilizerPlanObjC alloc] init];
 
     gf::GFFileHeader hdr{};
@@ -243,37 +404,26 @@ struct GFHistSlot {
         return self;
     }
 
+    gf::RefinedCalibration refinedCalib;
+    bool hasRefinedCalib = false;
+    if (useRefinedCalibration && refinedCalibPath && refinedCalibPath.length > 0) {
+        if (gf::RefinedCalibration::loadJsonFile([refinedCalibPath UTF8String], refinedCalib) && refinedCalib.valid) {
+            hasRefinedCalib = true;
+        }
+    }
+
     const double *customAxis = nullptr;
     const auto &presets = gf::OpticalSync::getAxisPresets();
     if (axisPresetIndex >= 0 && static_cast<size_t>(axisPresetIndex) < presets.size()) {
         customAxis = presets[static_cast<size_t>(axisPresetIndex)].m;
     }
 
-    _engine.setImuData(hdr, gyro, accel, customAxis, motoActionMode ? true : false, rollGyroScaleOverride);
-
-    _cfg = gf::StabilizerConfig{};
-    _cfg.pitchSmoothness = pitchSmoothness;
-    _cfg.yawSmoothness = yawSmoothness;
-    _cfg.rollSmoothness = rollSmoothness;
-    _cfg.velocityDamping = damping;
-    _cfg.timeOffsetMs = offsetMs;
-    _cfg.maxZoomLimit = maxZoomLimit;
-    _cfg.horizonLockEnabled = horizonLockEnabled ? true : false;
-    _cfg.horizonLockAmount = horizonLockAmount;
-    _cfg.horizonTiltOffsetDeg = horizonTiltOffsetDeg;
-    _cfg.horizonMode = (horizonMode == 1) ? gf::HorizonMode::ActionLevel40 :
-                       ((horizonMode == 2) ? gf::HorizonMode::Full360Lock : gf::HorizonMode::Off);
-    _cfg.rollingShutterCorrection = rollingShutterCorrection ? true : false;
-    _cfg.dynamicZoomEnabled = dynamicZoomEnabled ? true : false;
-    _cfg.motoActionMode = motoActionMode ? true : false;
-    _cfg.videoRotationDegrees = (int)videoRotationDegrees;
-
-    _traj = _engine.solve(frames, _cfg);
-    if (!_traj.valid) {
-        _plan.valid = NO;
-        _plan.errorMessage = @"Trajectory solver failed.";
-        return self;
-    }
+    _engine.setImuData(
+        hdr, gyro, accel, customAxis,
+        motoActionMode ? true : false,
+        rollGyroScaleOverride,
+        hasRefinedCalib ? &refinedCalib : nullptr
+    );
 
     _profile = (hdr.capture_mode == 1 || hdr.capture_mode == 2)
         ? gf::CalibrationProfile::defaultIPhone5s720p120()
@@ -304,12 +454,52 @@ struct GFHistSlot {
             _profile.fy = 1210.0;
         }
     }
-    if (hasReadoutOverride) {
-        _profile.readoutTimeSec = signedReadoutTimeMs * 0.001;
+    if (hasRefinedCalib) {
+        _profile.readoutTimeSec = refinedCalib.readoutMs * 0.001;
+        if (refinedCalib.focalScale >= 0.85 && refinedCalib.focalScale <= 1.20) {
+            _profile.fx *= refinedCalib.focalScale;
+            _profile.fy *= refinedCalib.focalScale;
+        }
+    } else {
+        if (hasReadoutOverride) {
+            _profile.readoutTimeSec = signedReadoutTimeMs * 0.001;
+        }
+        if (focalScaleOverride >= 0.85 && focalScaleOverride <= 1.20) {
+            _profile.fx *= focalScaleOverride;
+            _profile.fy *= focalScaleOverride;
+        }
     }
-    if (focalScaleOverride >= 0.85 && focalScaleOverride <= 1.20) {
-        _profile.fx *= focalScaleOverride;
-        _profile.fy *= focalScaleOverride;
+
+    _cfg = gf::StabilizerConfig{};
+    _cfg.pitchSmoothness = pitchSmoothness;
+    _cfg.yawSmoothness = yawSmoothness;
+    _cfg.rollSmoothness = rollSmoothness;
+    _cfg.velocityDamping = damping;
+    _cfg.timeOffsetMs = hasRefinedCalib ? (offsetMs - refinedCalib.offsetA) : offsetMs;
+    _cfg.maxZoomLimit = maxZoomLimit;
+    _cfg.horizonLockEnabled = horizonLockEnabled ? true : false;
+    _cfg.horizonLockAmount = horizonLockAmount;
+    _cfg.horizonTiltOffsetDeg = horizonTiltOffsetDeg;
+    _cfg.horizonMode = (horizonMode == 1) ? gf::HorizonMode::ActionLevel40 :
+                       ((horizonMode == 2) ? gf::HorizonMode::Full360Lock : gf::HorizonMode::Off);
+    _cfg.rollingShutterCorrection = rollingShutterCorrection ? true : false;
+    _cfg.dynamicZoomEnabled = dynamicZoomEnabled ? true : false;
+    _cfg.motoActionMode = motoActionMode ? true : false;
+    _cfg.useConstrainedPath = useConstrainedPath ? true : false;
+    _cfg.videoRotationDegrees = (int)videoRotationDegrees;
+    _cfg.calibWidth = _profile.width;
+    _cfg.calibHeight = _profile.height;
+    _cfg.calibFx = _profile.fx;
+    _cfg.calibFy = _profile.fy;
+    _cfg.calibCx = _profile.cx;
+    _cfg.calibCy = _profile.cy;
+    _cfg.calibReadoutSec = _profile.readoutTimeSec;
+
+    _traj = _engine.solve(frames, _cfg);
+    if (!_traj.valid) {
+        _plan.valid = NO;
+        _plan.errorMessage = @"Trajectory solver failed.";
+        return self;
     }
 
     _fps = (hdr.nominal_fps > 1.0) ? hdr.nominal_fps : 30.0;
@@ -335,6 +525,7 @@ struct GFHistSlot {
 
     _frameLUTs = std::move(warpRes.frameLUTs);
     _adjustedSmoothQuats = warpRes.adjustedSmoothQuats;
+    [self rebuildSharpenZoomLPF];
     _plan.frameCount = _frameLUTs.size();
     _plan.stabilityImprovementPct = _traj.stabilityImprovementPct;
     _plan.minZoom = warpRes.minZoom;
@@ -454,6 +645,7 @@ struct GFHistSlot {
     );
     _frameLUTs = std::move(warpRes.frameLUTs);
     _adjustedSmoothQuats = warpRes.adjustedSmoothQuats;
+    [self rebuildSharpenZoomLPF];
     _plan.minZoom = warpRes.minZoom;
     _plan.maxZoom = warpRes.maxZoom;
     _plan.avgZoom = warpRes.avgZoom;
@@ -590,8 +782,11 @@ struct GFHistSlot {
     }
 
     const float readoutAxis = (srcH > srcW) ? 1.0f : 0.0f;
+    const float sharpenZoom = (_temporalSharpenEnabled && clampedIdx < _sharpenZoomLPF.size())
+        ? static_cast<float>(_sharpenZoomLPF[clampedIdx])
+        : lut.zoomUsed;
     lumaU.histGains = simd_make_float4(gains[0], gains[1], gains[2], readoutAxis);
-    lumaU.polishParams = simd_make_float4((float)(int)_edgeFillMode, (float)_sharpenStrength, lut.zoomUsed, (float)activeHistCount);
+    lumaU.polishParams = simd_make_float4((float)(int)_edgeFillMode, (float)_sharpenStrength, sharpenZoom, (float)activeHistCount);
     lumaU.outSize = simd_make_uint2((uint32_t)dstW, (uint32_t)dstH);
     lumaU.inSize = simd_make_uint2((uint32_t)srcW, (uint32_t)srcH);
     lumaU.lumaOutSize = simd_make_uint2((uint32_t)dstW, (uint32_t)dstH);
@@ -614,6 +809,33 @@ struct GFHistSlot {
     GFWarpFrameUniformsMetal chromaU = lumaU;
     chromaU.outSize = simd_make_uint2((uint32_t)(dstW / 2), (uint32_t)(dstH / 2));
     chromaU.inSize = simd_make_uint2((uint32_t)(srcW / 2), (uint32_t)(srcH / 2));
+
+    float chromaOffX = 1.0f;
+    float chromaOffY = 1.0f;
+    if (_chromaSitingFixEnabled) {
+        CFTypeRef chromaLoc = CVBufferGetAttachment(srcPixelBuffer, kCVImageBufferChromaLocationTopFieldKey, nullptr);
+        if (chromaLoc) {
+            CVBufferSetAttachment(dstPixelBuffer, kCVImageBufferChromaLocationTopFieldKey, chromaLoc, kCVAttachmentMode_ShouldPropagate);
+            if (CFEqual(chromaLoc, kCVImageBufferChromaLocation_Left)) {
+                chromaOffX = 0.5f;
+                chromaOffY = 1.0f;
+            } else if (CFEqual(chromaLoc, kCVImageBufferChromaLocation_TopLeft)) {
+                chromaOffX = 0.5f;
+                chromaOffY = 0.5f;
+            } else if (CFEqual(chromaLoc, kCVImageBufferChromaLocation_Center)) {
+                chromaOffX = 1.0f;
+                chromaOffY = 1.0f;
+            }
+        } else {
+            const OSType pixFmt = CVPixelBufferGetPixelFormatType(srcPixelBuffer);
+            if (pixFmt == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) {
+                // H.264 / MPEG-2 default for 420v is Left siting
+                chromaOffX = 0.5f;
+                chromaOffY = 1.0f;
+            }
+        }
+    }
+    chromaU.polishParams = simd_make_float4((float)(int)_edgeFillMode, chromaOffX, chromaOffY, (float)activeHistCount);
 
     const MTLSize chromaGroups = MTLSizeMake(((dstW / 2) + 15) / 16, ((dstH / 2) + 15) / 16, 1);
 
@@ -675,6 +897,68 @@ struct GFHistSlot {
     CVMetalTextureCacheFlush(_textureCache, 0);
 
     return (cmdBuf.status == MTLCommandBufferStatusCompleted);
+}
+
+- (NSString *)computeQualityReportJSONWithClipName:(NSString *)clipName
+                                    inputPtsSec:(nullable NSArray<NSNumber *> *)inputPtsSec
+                                   outputPtsSec:(nullable NSArray<NSNumber *> *)outputPtsSec {
+    std::vector<double> zoomUsed;
+    zoomUsed.reserve(_frameLUTs.size());
+    for (const auto &lut : _frameLUTs) {
+        zoomUsed.push_back(static_cast<double>(lut.zoomUsed));
+    }
+    const std::vector<gf::Quat> &smoothQuats = !_adjustedSmoothQuats.empty()
+        ? _adjustedSmoothQuats
+        : _traj.smoothFrameQuats;
+    gf::QualityReport report = gf::QualityMetrics::evaluateTrajectory(
+        smoothQuats,
+        _fps > 1.0 ? _fps : 30.0,
+        &zoomUsed,
+        _traj.maxOutputRollErrorDeg
+    );
+
+    if (inputPtsSec && outputPtsSec) {
+        std::vector<double> inVec;
+        std::vector<double> outVec;
+        inVec.reserve(inputPtsSec.count);
+        outVec.reserve(outputPtsSec.count);
+        for (NSNumber *n in inputPtsSec) {
+            inVec.push_back([n doubleValue]);
+        }
+        for (NSNumber *n in outputPtsSec) {
+            outVec.push_back([n doubleValue]);
+        }
+        report.ptsCheck = gf::QualityMetrics::validatePtsIntegrity(inVec, outVec, _fps);
+    }
+    const std::string cName = clipName ? std::string([clipName UTF8String]) : "";
+    const std::string json = gf::QualityMetrics::toJson(report, cName);
+    return [NSString stringWithUTF8String:json.c_str()] ?: @"{}";
+}
+
++ (NSString *)validatePtsSummaryWithInputPtsSec:(NSArray<NSNumber *> *)inputPtsSec
+                                   outputPtsSec:(NSArray<NSNumber *> *)outputPtsSec
+                                     nominalFps:(double)nominalFps
+                                         passed:(BOOL *)outPassed {
+    std::vector<double> inVec;
+    std::vector<double> outVec;
+    inVec.reserve(inputPtsSec.count);
+    outVec.reserve(outputPtsSec.count);
+    for (NSNumber *n in inputPtsSec) {
+        inVec.push_back([n doubleValue]);
+    }
+    for (NSNumber *n in outputPtsSec) {
+        outVec.push_back([n doubleValue]);
+    }
+    const gf::PtsCheckResult res = gf::QualityMetrics::validatePtsIntegrity(inVec, outVec, nominalFps);
+    if (outPassed) {
+        *outPassed = res.passed ? YES : NO;
+    }
+    return [NSString stringWithFormat:
+        @"PTS %@: in=%zu out=%zu | nonMono=%zu dup=%zu writerDrop=%zu | dt=[%.2f..%.2f]ms (std=%.3fms) | maxStepDrift=%.3fms",
+        res.passed ? @"PASS" : @"WARN",
+        res.inputCount, res.outputCount,
+        res.nonMonotonicCount, res.duplicateFrameCount, res.writerDroppedCount,
+        res.minDtMs, res.maxDtMs, res.stdDevDtMs, res.maxInputOutputStepDriftMs];
 }
 
 - (void)flushTextureCache {

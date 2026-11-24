@@ -1,6 +1,14 @@
 import CoreMotion
 import Foundation
 
+struct ModeCalibrationHistory: Codable {
+    var readoutMsSamples: [Double]
+    var focalScaleSamples: [Double]
+    var scaleXSamples: [Double]
+    var scaleYSamples: [Double]
+    var scaleZSamples: [Double]
+}
+
 struct CalibrationData: Codable {
     var gyroBiasX: Double
     var gyroBiasY: Double
@@ -20,6 +28,7 @@ struct CalibrationData: Codable {
     var p2: Double
     var calibratedAt: Date?
     var maxGyroStdDev: Double?
+    var modeHistory: [String: ModeCalibrationHistory]?
 
     static func defaultIPhone5s() -> CalibrationData {
         return CalibrationData(
@@ -40,7 +49,8 @@ struct CalibrationData: Codable {
             p1: 0.0,
             p2: 0.0,
             calibratedAt: nil,
-            maxGyroStdDev: nil
+            maxGyroStdDev: nil,
+            modeHistory: nil
         )
     }
 }
@@ -92,6 +102,59 @@ final class CalibrationManager {
         current = profile
         if let encoded = try? JSONEncoder().encode(profile) {
             try? encoded.write(to: profileURL, options: .atomic)
+        }
+    }
+
+    func priorForMode(_ captureMode: UInt32) -> (hasPrior: Bool, readoutMs: Double, focalScale: Double, scaleX: Double, scaleY: Double, scaleZ: Double) {
+        let defaultRsMs = (captureMode == 1 || captureMode == 2) ? (current.readout720p120Sec * 1000.0) : (current.readout1080p30Sec * 1000.0)
+        return queue.sync {
+            let key = "\(captureMode)"
+            guard let hist = current.modeHistory?[key], !hist.readoutMsSamples.isEmpty else {
+                return (false, defaultRsMs, 1.0, 1.0, 1.0, 1.0)
+            }
+            let rs = GFCalibrationRefinerBridge.median(ofNumbers: hist.readoutMsSamples.map { NSNumber(value: $0) })
+            let fs = hist.focalScaleSamples.isEmpty ? 1.0 : GFCalibrationRefinerBridge.median(ofNumbers: hist.focalScaleSamples.map { NSNumber(value: $0) })
+            let sx = hist.scaleXSamples.isEmpty ? 1.0 : GFCalibrationRefinerBridge.median(ofNumbers: hist.scaleXSamples.map { NSNumber(value: $0) })
+            let sy = hist.scaleYSamples.isEmpty ? 1.0 : GFCalibrationRefinerBridge.median(ofNumbers: hist.scaleYSamples.map { NSNumber(value: $0) })
+            let sz = hist.scaleZSamples.isEmpty ? 1.0 : GFCalibrationRefinerBridge.median(ofNumbers: hist.scaleZSamples.map { NSNumber(value: $0) })
+            return (true, rs, fs, sx, sy, sz)
+        }
+    }
+
+    func recordRefinedPrior(
+        captureMode: UInt32,
+        readoutMs: Double,
+        focalScale: Double,
+        scaleX: Double,
+        scaleY: Double,
+        scaleZ: Double
+    ) {
+        queue.sync {
+            let key = "\(captureMode)"
+            var map = current.modeHistory ?? [:]
+            var hist = map[key] ?? ModeCalibrationHistory(
+                readoutMsSamples: [],
+                focalScaleSamples: [],
+                scaleXSamples: [],
+                scaleYSamples: [],
+                scaleZSamples: []
+            )
+            let maxSamples = 9
+            func appendBounded(_ arr: inout [Double], _ val: Double) {
+                arr.append(val)
+                if arr.count > maxSamples {
+                    arr.removeFirst(arr.count - maxSamples)
+                }
+            }
+            appendBounded(&hist.readoutMsSamples, readoutMs)
+            appendBounded(&hist.focalScaleSamples, focalScale)
+            appendBounded(&hist.scaleXSamples, scaleX)
+            appendBounded(&hist.scaleYSamples, scaleY)
+            appendBounded(&hist.scaleZSamples, scaleZ)
+            map[key] = hist
+            var updated = current
+            updated.modeHistory = map
+            save(updated)
         }
     }
 

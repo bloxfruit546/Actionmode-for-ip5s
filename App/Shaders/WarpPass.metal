@@ -93,7 +93,9 @@ inline float3 solveRollingShutterAndDistort(
         const float invW = 1.0f / w;
         sx = dot(r0, dstP) * invW;
         sy = dot(r1, dstP) * invW;
-        rowNorm = scanAlongX ? clamp(sx / inWMinus1, 0.0f, 1.0f) : clamp(sy / inHMinus1, 0.0f, 1.0f);
+        rowNorm = scanAlongX
+            ? clamp((sx - 0.5f) / inWMinus1, 0.0f, 1.0f)
+            : clamp((sy - 0.5f) / inHMinus1, 0.0f, 1.0f);
     }
 
     return applyBrownConradyDistort(sx, sy, u);
@@ -239,13 +241,15 @@ kernel void lanczos4_warp_luma(
         const float clampedY = clamp(rawY, min2x2 - 0.025f, max2x2 + 0.025f);
         const float relaxedY = mix(rawY, clampedY, 0.75f);
 
-        // Zoom-Proportional Contrast-Adaptive Sharpening (zero extra texture reads)
+        // Temporally-Stable Contrast-Adaptive Sharpening driven by sub-1 Hz filtered zoom & coherent gradient gate
         float sharpenedY = relaxedY;
         if (sharpenStrength > 1e-4f) {
-            const float localContrast = max2x2 - min2x2;
-            const float flatNoiseGate = smoothstep(0.015f, 0.05f, localContrast);
+            const float gradX = 0.5f * abs((c10 + c11) - (c00 + c01));
+            const float gradY = 0.5f * abs((c01 + c11) - (c00 + c10));
+            const float coherentGrad = max(gradX, gradY);
+            const float flatNoiseGate = smoothstep(0.025f, 0.085f, coherentGrad);
             const float haloGuard = clamp(1.0f - max2x2, 0.0f, 1.0f);
-            const float zoomBoost = clamp(1.0f + 1.15f * (currentZoom - 1.0f), 1.0f, 2.05f);
+            const float zoomBoost = clamp(1.0f + 0.70f * (currentZoom - 1.0f), 1.0f, 1.60f);
             const float avg2x2 = 0.25f * (c00 + c10 + c01 + c11);
             const float detail = relaxedY - avg2x2;
             const float casWeight = sharpenStrength * zoomBoost * flatNoiseGate * (0.35f + 0.65f * haloGuard);
@@ -316,15 +320,17 @@ kernel void lanczos4_warp_chroma(
     }
 
     const int edgeFillMode = int(u.polishParams.x + 0.5f);
+    const float chromaOffX = (u.polishParams.y > 0.1f) ? u.polishParams.y : 1.0f;
+    const float chromaOffY = (u.polishParams.z > 0.1f) ? u.polishParams.z : 1.0f;
     const int histCount = int(u.polishParams.w + 0.5f);
 
-    const float2 lumaDst = float2(gid) * 2.0f + 1.0f;
+    const float2 lumaDst = float2(gid) * 2.0f + float2(chromaOffX, chromaOffY);
     const float3 solved = solveRollingShutterAndDistort(lumaDst.x, lumaDst.y, u);
 
     const int maxX = int(u.inSize.x) - 1;
     const int maxY = int(u.inSize.y) - 1;
-    const float sx = (solved.x - 1.0f) * 0.5f;
-    const float sy = (solved.y - 1.0f) * 0.5f;
+    const float sx = (solved.x - chromaOffX) * 0.5f;
+    const float sy = (solved.y - chromaOffY) * 0.5f;
 
     float edgeDist = -100.0f;
     if (solved.z > 0.5f) {
@@ -374,8 +380,8 @@ kernel void lanczos4_warp_chroma(
             if (hSolved.z > 0.5f &&
                 hSolved.x >= 4.0f && hSolved.x <= float(u.lumaInSize.x - 5) &&
                 hSolved.y >= 4.0f && hSolved.y <= float(u.lumaInSize.y - 5)) {
-                const float hsx = (hSolved.x - 1.0f) * 0.5f;
-                const float hsy = (hSolved.y - 1.0f) * 0.5f;
+                const float hsx = (hSolved.x - chromaOffX) * 0.5f;
+                const float hsy = (hSolved.y - chromaOffY) * 0.5f;
                 float2 hUV = float2(0.5f, 0.5f);
                 if (h == 0) {
                     hUV = sampleBilinearChroma(histTex0, hsx, hsy, maxX, maxY);

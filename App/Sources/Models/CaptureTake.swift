@@ -1,5 +1,13 @@
 import Foundation
 
+struct CaptureTakeAuxMetadata: Codable {
+    let hardwareDroppedFrames: UInt32
+    let writerDroppedFrames: UInt32
+    let lockedLensPosition: Float
+    let lockedWhiteBalanceGains: [Float]
+    let focusAndWbLockedOnRecord: Bool
+}
+
 struct CaptureTake {
     let uuid: String
     let movURL: URL
@@ -64,8 +72,28 @@ final class CaptureTakeStore {
         return takes.sorted { $0.createdAt > $1.createdAt }
     }
 
+    static func auxMetadataURL(for uuid: String) -> URL {
+        return capturesDirectory.appendingPathComponent("\(uuid).meta.json")
+    }
+
+    static func calibMetadataURL(for uuid: String) -> URL {
+        return capturesDirectory.appendingPathComponent("\(uuid).calib.json")
+    }
+
+    static func saveAuxMetadata(_ meta: CaptureTakeAuxMetadata, for uuid: String) {
+        guard let data = try? JSONEncoder().encode(meta) else { return }
+        try? data.write(to: auxMetadataURL(for: uuid), options: .atomic)
+    }
+
+    static func loadAuxMetadata(for uuid: String) -> CaptureTakeAuxMetadata? {
+        guard let data = try? Data(contentsOf: auxMetadataURL(for: uuid)) else { return nil }
+        return try? JSONDecoder().decode(CaptureTakeAuxMetadata.self, from: data)
+    }
+
     static func deleteTake(_ take: CaptureTake) {
         try? FileManager.default.removeItem(at: take.movURL)
         try? FileManager.default.removeItem(at: take.sidecarURL)
+        try? FileManager.default.removeItem(at: auxMetadataURL(for: take.uuid))
+        try? FileManager.default.removeItem(at: calibMetadataURL(for: take.uuid))
     }
 }

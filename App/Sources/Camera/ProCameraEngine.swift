@@ -108,6 +108,7 @@ final class ProCameraEngine: NSObject {
     private(set) var currentBitrate: BitratePreset = .mbps45
     private(set) var isFocusLocked = false
     private(set) var isExposureLocked = false
+    private(set) var lockFocusAndWhiteBalanceOnRecord = true
     private(set) var isAntiBlurCapEnabled = true
     private(set) var shutterCapTimescale: Int32 = ShutterCeilingMode.action200.rawValue
     private(set) var isMotoModeEnabled = false
@@ -131,6 +132,16 @@ final class ProCameraEngine: NSObject {
     private var activeReadoutSec: Float = 0.0152
     private var telemetryTimer: DispatchSourceTimer?
     private var isEISOff = true
+
+    // Record-time focus/WB lock & dropped frame counters
+    private let dropLock = NSLock()
+    private var recordedHardwareDrops: UInt32 = 0
+    private var recordedWriterDrops: UInt32 = 0
+    private var preRecordFocusWasAuto = false
+    private var preRecordWbWasAuto = false
+    private var lockedRecLensPos: Float = 0.0
+    private var lockedRecWbGains: [Float] = []
+    private var didLockOnCurrentRecord = false
 
     // Circular 500ms IMU pre-roll buffer + live sidecar sink
     private struct BufferedGyroSample {
@@ -188,6 +199,12 @@ final class ProCameraEngine: NSObject {
     func setBitratePreset(_ preset: BitratePreset) {
         sessionQueue.async { [weak self] in
             self?.currentBitrate = preset
+        }
+    }
+
+    func setLockFocusAndWhiteBalanceOnRecord(_ enabled: Bool) {
+        sessionQueue.async { [weak self] in
+            self?.lockFocusAndWhiteBalanceOnRecord = enabled
         }
     }
 
@@ -303,6 +320,60 @@ final class ProCameraEngine: NSObject {
     func startRecording() {
         sessionQueue.async { [weak self] in
             guard let self = self, !self.isRecording else { return }
+
+            self.dropLock.lock()
+            self.recordedHardwareDrops = 0
+            self.recordedWriterDrops = 0
+            self.dropLock.unlock()
+
+            self.preRecordFocusWasAuto = false
+            self.preRecordWbWasAuto = false
+            self.lockedRecLensPos = self.videoDevice?.lensPosition ?? 0.0
+            self.lockedRecWbGains = []
+            self.didLockOnCurrentRecord = false
+
+            if self.lockFocusAndWhiteBalanceOnRecord, let dev = self.videoDevice {
+                do {
+                    try dev.lockForConfiguration()
+                    if !self.isFocusLocked && dev.focusMode != .locked {
+                        let curLens = dev.lensPosition
+                        if dev.isLockingFocusWithCustomLensPositionSupported {
+                            dev.setFocusModeLocked(lensPosition: curLens, completionHandler: nil)
+                            self.preRecordFocusWasAuto = true
+                            self.lockedRecLensPos = curLens
+                        } else if dev.isFocusModeSupported(.locked) {
+                            dev.focusMode = .locked
+                            self.preRecordFocusWasAuto = true
+                            self.lockedRecLensPos = curLens
+                        }
+                    } else {
+                        self.lockedRecLensPos = dev.lensPosition
+                    }
+                    if dev.whiteBalanceMode != .locked && dev.isWhiteBalanceModeSupported(.locked) {
+                        let rawGains = dev.deviceWhiteBalanceGains
+                        let maxG = max(1.0, dev.maxWhiteBalanceGain)
+                        let clamped = AVCaptureDevice.WhiteBalanceGains(
+                            redGain: min(maxG, max(1.0, rawGains.redGain)),
+                            greenGain: min(maxG, max(1.0, rawGains.greenGain)),
+                            blueGain: min(maxG, max(1.0, rawGains.blueGain))
+                        )
+                        dev.setWhiteBalanceModeLocked(with: clamped, completionHandler: nil)
+                        self.preRecordWbWasAuto = true
+                        self.lockedRecWbGains = [clamped.redGain, clamped.greenGain, clamped.blueGain]
+                    }
+                    dev.unlockForConfiguration()
+                    self.didLockOnCurrentRecord = true
+                    FileLogger.shared.log(String(
+                        format: "Record Locks ACTIVE: lensPos=%.3f wbGains=(%.2f,%.2f,%.2f)",
+                        self.lockedRecLensPos,
+                        self.lockedRecWbGains.count == 3 ? self.lockedRecWbGains[0] : 0.0,
+                        self.lockedRecWbGains.count == 3 ? self.lockedRecWbGains[1] : 0.0,
+                        self.lockedRecWbGains.count == 3 ? self.lockedRecWbGains[2] : 0.0
+                    ))
+                } catch {
+                    FileLogger.shared.log("Record Focus/WB lock error: \(error.localizedDescription)")
+                }
+            }
 
             let paths = CaptureTakeStore.makeNewTakePaths()
             let calib = CalibrationManager.shared.current
@@ -456,6 +527,23 @@ final class ProCameraEngine: NSObject {
             guard let self = self, self.isRecording else { return }
             self.isRecording = false
 
+            if let dev = self.videoDevice, (self.preRecordFocusWasAuto || self.preRecordWbWasAuto) {
+                do {
+                    try dev.lockForConfiguration()
+                    if self.preRecordFocusWasAuto && !self.isFocusLocked && !self.isMotoModeEnabled && dev.isFocusModeSupported(.continuousAutoFocus) {
+                        dev.focusMode = .continuousAutoFocus
+                    }
+                    if self.preRecordWbWasAuto && dev.isWhiteBalanceModeSupported(.continuousAutoWhiteBalance) {
+                        dev.whiteBalanceMode = .continuousAutoWhiteBalance
+                    }
+                    dev.unlockForConfiguration()
+                } catch {
+                    FileLogger.shared.log("Record Focus/WB restore error: \(error.localizedDescription)")
+                }
+            }
+            self.preRecordFocusWasAuto = false
+            self.preRecordWbWasAuto = false
+
             // Post-roll 120ms so final IMU timestamps always cover lastFramePts + 0.12s
             Thread.sleep(forTimeInterval: 0.12)
 
@@ -499,6 +587,20 @@ final class ProCameraEngine: NSObject {
                     let summary = GFSidecarReaderBridge.inspectFile(atPath: paths.sidecarURL.path)
                     let err = writer.error
 
+                    self.dropLock.lock()
+                    let hwDrops = self.recordedHardwareDrops
+                    let wrDrops = self.recordedWriterDrops
+                    self.dropLock.unlock()
+
+                    let auxMeta = CaptureTakeAuxMetadata(
+                        hardwareDroppedFrames: hwDrops,
+                        writerDroppedFrames: wrDrops,
+                        lockedLensPosition: self.lockedRecLensPos,
+                        lockedWhiteBalanceGains: self.lockedRecWbGains,
+                        focusAndWbLockedOnRecord: self.didLockOnCurrentRecord
+                    )
+                    CaptureTakeStore.saveAuxMetadata(auxMeta, for: paths.uuid)
+
                     self.assetWriter = nil
                     self.videoWriterInput = nil
                     self.audioWriterInput = nil
@@ -507,10 +609,13 @@ final class ProCameraEngine: NSObject {
                     self.activeTakePaths = nil
 
                     FileLogger.shared.log(String(
-                        format: "Recording STOPPED: %@ | frames=%llu gyro=%.1fHz dropped=%u syncOK=%@",
+                        format: "Recording STOPPED: %@ | frames=%llu gyro=%.1fHz ptsDrops=%u hwDidDrop=%u writerDrop=%u syncOK=%@",
                         paths.uuid, summary.frameCount, summary.gyroHz, summary.droppedFrames,
-                        summary.syncCoverageOk ? "YES" : "NO"
+                        hwDrops, wrDrops, summary.syncCoverageOk ? "YES" : "NO"
                     ))
+                    if hwDrops > 0 || wrDrops > 0 || summary.droppedFrames > 0 {
+                        FileLogger.shared.log("WARN: Frame drops detected during \(paths.uuid) (didDrop=\(hwDrops), writerDrop=\(wrDrops), ptsGaps=\(summary.droppedFrames))")
+                    }
 
                     DispatchQueue.main.async {
                         self.delegate?.cameraEngineDidFinishRecording(take: take, summary: summary, error: err)
@@ -922,6 +1027,22 @@ extension ProCameraEngine: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptu
                             rollingShutterSec: self.activeReadoutSec
                         )
                         self.recordedFrameIndex += 1
+                    } else {
+                        self.dropLock.lock()
+                        self.recordedWriterDrops += 1
+                        let curDrops = self.recordedWriterDrops
+                        self.dropLock.unlock()
+                        if curDrops <= 5 {
+                            FileLogger.shared.log("WARN: AVAssetWriter append dropped frame (total writer drops=\(curDrops))")
+                        }
+                    }
+                } else {
+                    self.dropLock.lock()
+                    self.recordedWriterDrops += 1
+                    let curDrops = self.recordedWriterDrops
+                    self.dropLock.unlock()
+                    if curDrops <= 5 {
+                        FileLogger.shared.log("WARN: videoWriterInput not ready, dropped frame (total writer drops=\(curDrops))")
                     }
                 }
             }
@@ -937,6 +1058,23 @@ extension ProCameraEngine: AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptu
                 }
                 aInput.append(sampleBuffer)
             }
+        }
+    }
+
+    func captureOutput(
+        _ output: AVCaptureOutput,
+        didDrop sampleBuffer: CMSampleBuffer,
+        from connection: AVCaptureConnection
+    ) {
+        guard isRecording, output === videoOutput else { return }
+        dropLock.lock()
+        recordedHardwareDrops += 1
+        let count = recordedHardwareDrops
+        dropLock.unlock()
+        if count <= 10 {
+            let reasonAttach = CMGetAttachment(sampleBuffer, key: kCMSampleBufferAttachmentKey_DroppedFrameReason, attachmentModeOut: nil)
+            let reasonStr = reasonAttach.map { "\($0)" } ?? "unknown"
+            FileLogger.shared.log("WARN: Camera hardware didDrop frame #\(count) (reason=\(reasonStr))")
         }
     }
 }
