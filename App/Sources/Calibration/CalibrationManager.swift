@@ -107,7 +107,7 @@ final class CalibrationManager {
 
     func priorForMode(_ captureMode: UInt32) -> (hasPrior: Bool, readoutMs: Double, focalScale: Double, scaleX: Double, scaleY: Double, scaleZ: Double) {
         let defaultRsMs = (captureMode == 1 || captureMode == 2) ? (current.readout720p120Sec * 1000.0) : (current.readout1080p30Sec * 1000.0)
-        return queue.sync {
+        return queue.sync { () -> (hasPrior: Bool, readoutMs: Double, focalScale: Double, scaleX: Double, scaleY: Double, scaleZ: Double) in
             let key = "\(captureMode)"
             guard let hist = current.modeHistory?[key], !hist.readoutMsSamples.isEmpty else {
                 return (false, defaultRsMs, 1.0, 1.0, 1.0, 1.0)

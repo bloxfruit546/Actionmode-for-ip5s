@@ -361,7 +361,7 @@ final class StabilizeViewController: UIViewController {
 
     private func loadCachedRefinedCalibration() {
         let calibURL = CaptureTakeStore.calibMetadataURL(for: take.uuid)
-        if let cal = GFRefinedCalibrationObjC.loadFromJSONPath(calibURL.path), cal.valid {
+        if let cal = GFRefinedCalibrationObjC.load(fromJSONPath: calibURL.path), cal.valid {
             calibSummaryLabel.text = cal.summaryString
             offsetSlider.value = Float(cal.offsetA)
         }
