@@ -5,6 +5,8 @@
  *   - Inverse Homography in FrameWarpCalculator: H_i(r) = K_real * R_CW(t_r) * R_CW_smooth(i)^T * K_virt^(-1).
  */
 #include "TrajectoryEngine.hpp"
+#include "CalibrationRefiner.hpp"
+#include "ConstrainedPathOptimizer.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -258,17 +260,45 @@ void TrajectoryEngine::setImuData(
     const std::vector<GFAccelRecord>& accelRecords,
     const double* customAxisMatrix,
     bool motoActionMode,
-    double rollGyroScale
+    double rollGyroScale,
+    const RefinedCalibration* refinedCalib
 ) {
     integratedSamples_.clear();
     nominalFps_ = (header.nominal_fps > 1.0) ? header.nominal_fps : 30.0;
+
+    const CalibrationProfile defProf = (header.capture_mode == 1 || header.capture_mode == 2)
+        ? CalibrationProfile::defaultIPhone5s720p120()
+        : CalibrationProfile::defaultIPhone5s1080p30();
+    hdrWidth_ = (header.width >= 320) ? header.width : defProf.width;
+    hdrHeight_ = (header.height >= 240) ? header.height : defProf.height;
+    hdrFx_ = (header.lens_fx > 50.0) ? header.lens_fx : defProf.fx;
+    hdrFy_ = (header.lens_fy > 50.0) ? header.lens_fy : defProf.fy;
+    hdrCx_ = (header.lens_cx > 10.0) ? header.lens_cx : (0.5 * hdrWidth_);
+    hdrCy_ = (header.lens_cy > 10.0) ? header.lens_cy : (0.5 * hdrHeight_);
+    const uint32_t longSide = std::max(hdrWidth_, hdrHeight_);
+    if (longSide >= 1900 && (hdrFx_ < 1500.0 || std::fabs(hdrFx_ - 1660.0) < 2.0)) {
+        hdrFx_ = 1815.0;
+        hdrFy_ = 1815.0;
+    } else if (longSide >= 1200 && longSide < 1500 && (hdrFx_ < 1000.0 || std::fabs(hdrFx_ - 1106.67) < 2.0)) {
+        hdrFx_ = 1210.0;
+        hdrFy_ = 1210.0;
+    }
+    hdrReadoutSec_ = (std::fabs(header.readout_time_sec) > 1e-6) ? header.readout_time_sec : defProf.readoutTimeSec;
+    if (refinedCalib != nullptr && refinedCalib->valid) {
+        hdrReadoutSec_ = refinedCalib->readoutMs * 0.001;
+        if (refinedCalib->focalScale >= 0.85 && refinedCalib->focalScale <= 1.20) {
+            hdrFx_ *= refinedCalib->focalScale;
+            hdrFy_ *= refinedCalib->focalScale;
+        }
+    }
 
     if (gyroRecords.empty()) {
         return;
     }
 
+    const bool useRefined = (refinedCalib != nullptr && refinedCalib->valid);
     const double defaultMat[9] = {0, -1, 0, -1, 0, 0, 0, 0, -1};
-    const double* M = customAxisMatrix ? customAxisMatrix : defaultMat;
+    const double* M = customAxisMatrix ? customAxisMatrix : (useRefined ? refinedCalib->axisMatrix : defaultMat);
 
     std::vector<GFGyroRecord> sortedGyro = gyroRecords;
     std::sort(sortedGyro.begin(), sortedGyro.end(), [](const GFGyroRecord& a, const GFGyroRecord& b) {
@@ -277,7 +307,12 @@ void TrajectoryEngine::setImuData(
 
     std::vector<GFGyroRecord> dedupGyro;
     dedupGyro.reserve(sortedGyro.size());
-    for (const auto& g : sortedGyro) {
+    for (auto g : sortedGyro) {
+        if (useRefined) {
+            const double denomDrift = std::max(0.5, 1.0 + 1e-3 * refinedCalib->offsetB);
+            g.timestamp_sec = refinedCalib->referenceStartSec +
+                (g.timestamp_sec - refinedCalib->referenceStartSec - 1e-3 * refinedCalib->offsetA) / denomDrift;
+        }
         if (dedupGyro.empty() || (g.timestamp_sec - dedupGyro.back().timestamp_sec) > 1e-6) {
             dedupGyro.push_back(g);
         }
@@ -287,6 +322,13 @@ void TrajectoryEngine::setImuData(
     std::sort(sortedAccel.begin(), sortedAccel.end(), [](const GFAccelRecord& a, const GFAccelRecord& b) {
         return a.timestamp_sec < b.timestamp_sec;
     });
+    if (useRefined) {
+        const double denomDrift = std::max(0.5, 1.0 + 1e-3 * refinedCalib->offsetB);
+        for (auto& a : sortedAccel) {
+            a.timestamp_sec = refinedCalib->referenceStartSec +
+                (a.timestamp_sec - refinedCalib->referenceStartSec - 1e-3 * refinedCalib->offsetA) / denomDrift;
+        }
+    }
 
     const Vec3 biasIos(header.gyro_bias_x, header.gyro_bias_y, header.gyro_bias_z);
 
@@ -299,9 +341,20 @@ void TrajectoryEngine::setImuData(
     double dtSum = 0.0;
     for (size_t i = 0; i < nGyro; ++i) {
         const auto& g = dedupGyro[i];
-        const Vec3 rawOmegaIos(g.gx - biasIos.x, g.gy - biasIos.y, g.gz - biasIos.z);
-        Vec3 wCam = applyAxisMatrix(M, rawOmegaIos);
-        wCam.z *= clampedRollScale;
+        Vec3 wCam(0.0, 0.0, 0.0);
+        if (useRefined) {
+            const Vec3 wRawCam = applyAxisMatrix(M, Vec3(g.gx, g.gy, g.gz));
+            const double sx = (refinedCalib->scale[0] >= 0.80 && refinedCalib->scale[0] <= 1.25) ? refinedCalib->scale[0] : 1.0;
+            const double sy = (refinedCalib->scale[1] >= 0.80 && refinedCalib->scale[1] <= 1.25) ? refinedCalib->scale[1] : 1.0;
+            const double sz = (refinedCalib->scale[2] >= 0.80 && refinedCalib->scale[2] <= 1.25) ? refinedCalib->scale[2] : 1.0;
+            wCam.x = (wRawCam.x - refinedCalib->bias[0]) / sx;
+            wCam.y = (wRawCam.y - refinedCalib->bias[1]) / sy;
+            wCam.z = (wRawCam.z - refinedCalib->bias[2]) / sz;
+        } else {
+            const Vec3 rawOmegaIos(g.gx - biasIos.x, g.gy - biasIos.y, g.gz - biasIos.z);
+            wCam = applyAxisMatrix(M, rawOmegaIos);
+            wCam.z *= clampedRollScale;
+        }
         omegaCamArr[i] = wCam;
         if (i > 0) {
             dtSum += std::min(0.1, std::max(1e-6, g.timestamp_sec - dedupGyro[i - 1].timestamp_sec));
@@ -655,6 +708,54 @@ TrajectoryResult TrajectoryEngine::solve(
         result.stabilityImprovementPct = 0.0;
         result.valid = true;
         return result;
+    }
+
+    if (config.useConstrainedPath) {
+        ConstrainedPathInput cpIn;
+        cpIn.engine = this;
+        cpIn.rawFrameQuats = &result.rawFrameQuats;
+        cpIn.frameGravityW = &frameGravityW;
+        cpIn.frameTimestampsSec = &result.frameTimestampsSec;
+        cpIn.nominalFps = nominalFps_;
+        cpIn.width = (config.calibWidth >= 320) ? config.calibWidth : hdrWidth_;
+        cpIn.height = (config.calibHeight >= 240) ? config.calibHeight : hdrHeight_;
+        cpIn.fx = (config.calibFx > 50.0) ? config.calibFx : hdrFx_;
+        cpIn.fy = (config.calibFy > 50.0) ? config.calibFy : hdrFy_;
+        cpIn.cx = (config.calibCx > 10.0) ? config.calibCx : hdrCx_;
+        cpIn.cy = (config.calibCy > 10.0) ? config.calibCy : hdrCy_;
+        cpIn.readoutTimeSec = (config.calibReadoutSec >= 0.0)
+            ? config.calibReadoutSec
+            : ((std::fabs(frames[0].rolling_shutter_sec) > 1e-6) ? static_cast<double>(frames[0].rolling_shutter_sec) : hdrReadoutSec_);
+
+        ConstrainedPathResult cpOut = ConstrainedPathOptimizer::solve(cpIn, config);
+        if (cpOut.valid && cpOut.smoothFrameQuats.size() == n) {
+            result.smoothFrameQuats = std::move(cpOut.smoothFrameQuats);
+            result.detectedGravityQuadrantDeg = cpOut.detectedGravityQuadrantDeg;
+            result.avgPanRatio = cpOut.avgPanRatio;
+            result.maxSwingCapDeg = cpOut.maxSwingCapDeg;
+
+            result.rawAngularAccelRms = computeAngularAccelRms(result.rawFrameQuats, dtF);
+            result.smoothAngularAccelRms = computeAngularAccelRms(result.smoothFrameQuats, dtF);
+            if (result.rawAngularAccelRms > 1e-9) {
+                const double rmsRatio = result.smoothAngularAccelRms / result.rawAngularAccelRms;
+                result.stabilityImprovementPct = std::min(99.5, std::max(0.0, (1.0 - rmsRatio) * 100.0));
+            }
+
+            double maxInRoll = 0.0;
+            double maxOutRoll = 0.0;
+            double maxCorr = 0.0;
+            for (size_t i = 0; i < n; ++i) {
+                maxInRoll = std::max(maxInRoll, std::fabs(computeRollErrorDeg(result.rawFrameQuats[i], frameGravityW[i], result.detectedGravityQuadrantDeg)));
+                maxOutRoll = std::max(maxOutRoll, std::fabs(computeRollErrorDeg(result.smoothFrameQuats[i], frameGravityW[i], result.detectedGravityQuadrantDeg)));
+                const double corrDeg = rotationAngleBetween(result.rawFrameQuats[i], result.smoothFrameQuats[i]) * (180.0 / kPi);
+                maxCorr = std::max(maxCorr, corrDeg);
+            }
+            result.maxInputRollDeg = maxInRoll;
+            result.maxOutputRollErrorDeg = maxOutRoll;
+            result.maxCorrectionDeg = maxCorr;
+            result.valid = true;
+            return result;
+        }
     }
 
     const bool isPortrait = (config.videoRotationDegrees == 90 || config.videoRotationDegrees == 270);

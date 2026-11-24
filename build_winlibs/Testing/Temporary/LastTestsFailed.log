@@ -1,0 +1,5 @@
+1:gf_core_math_tests
+2:gf_sidecar_calib_tests
+3:gf_stabilizer_tests
+4:gf_horizon_rs_autosync_tests
+5:gf_quality_metrics_tests

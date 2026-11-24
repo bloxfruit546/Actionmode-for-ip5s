@@ -1,5 +1,6 @@
 #include "CalibrationProfile.hpp"
 #include "FrameWarpCalculator.hpp"
+#include "QualityMetrics.hpp"
 #include "Quaternion.hpp"
 #include "TrajectoryEngine.hpp"
 
@@ -111,7 +112,8 @@ double computeSSIM(const std::vector<double>& a, const std::vector<double>& b, i
 
 double sampleLanczos4CasCPU(
     const std::vector<double>& img, int w, int h,
-    double sx, double sy, double sharpenStrength, double currentZoom
+    double sx, double sy, double sharpenStrength, double currentZoom,
+    bool legacyCas = false
 ) {
     const int maxX = w - 1;
     const int maxY = h - 1;
@@ -158,12 +160,23 @@ double sampleLanczos4CasCPU(
         return std::min(1.0, std::max(0.0, relaxedY));
     }
 
-    const double localContrast = max2x2 - min2x2;
-    const double flatNoiseGate = smoothstepD(0.015, 0.05, localContrast);
     const double haloGuard = std::min(1.0, std::max(0.0, 1.0 - max2x2));
-    const double zoomBoost = std::min(1.65, std::max(1.0, 1.0 + 0.85 * (currentZoom - 1.0)));
     const double avg2x2 = 0.25 * (c00 + c10 + c01 + c11);
     const double detail = relaxedY - avg2x2;
+
+    if (legacyCas) {
+        const double localContrast = max2x2 - min2x2;
+        const double flatNoiseGate = smoothstepD(0.015, 0.05, localContrast);
+        const double zoomBoost = std::min(2.05, std::max(1.0, 1.0 + 1.15 * (currentZoom - 1.0)));
+        const double casWeight = sharpenStrength * zoomBoost * flatNoiseGate * (0.35 + 0.65 * haloGuard);
+        return std::min(1.0, std::max(0.0, relaxedY + casWeight * detail));
+    }
+
+    const double gradX = 0.5 * std::fabs((c10 + c11) - (c00 + c01));
+    const double gradY = 0.5 * std::fabs((c01 + c11) - (c00 + c10));
+    const double coherentGrad = std::max(gradX, gradY);
+    const double flatNoiseGate = smoothstepD(0.025, 0.085, coherentGrad);
+    const double zoomBoost = std::min(1.60, std::max(1.0, 1.0 + 0.70 * (currentZoom - 1.0)));
     const double casWeight = sharpenStrength * zoomBoost * flatNoiseGate * (0.35 + 0.65 * haloGuard);
     return std::min(1.0, std::max(0.0, relaxedY + casWeight * detail));
 }
@@ -375,6 +388,414 @@ void testFinalBenchmarkScorecard(double rotPsnr, double rotSsim) {
     );
 }
 
+void testQualityMetricsAndVideoAnalyzer() {
+    // 1. Compare clean pan vs high-freq shaky pan vs kinked clamp path
+    const int n = 150;
+    const double fps = 30.0;
+    const double dt = 1.0 / fps;
+    std::vector<gf::Vec3> smoothOmega;
+    std::vector<gf::Vec3> shakyOmega;
+    std::vector<gf::Vec3> kinkedOmega;
+    std::vector<double> zoomUsed(static_cast<size_t>(n), 1.32);
+
+    for (int i = 0; i + 1 < n; ++i) {
+        const double t = i * dt;
+        const double pan = 0.4 * std::sin(kPi * t / 5.0);
+        smoothOmega.emplace_back(0.0, pan, 0.0);
+        shakyOmega.emplace_back(
+            0.35 * std::sin(2.0 * kPi * 5.0 * t),
+            pan + 0.30 * std::cos(2.0 * kPi * 4.5 * t),
+            0.18 * std::sin(2.0 * kPi * 6.0 * t)
+        );
+        double kink = 0.0;
+        if (i == 45) kink = 0.35;
+        if (i == 46) kink = -0.35;
+        if (i == 95) kink = -0.40;
+        if (i == 96) kink = 0.40;
+        kinkedOmega.emplace_back(kink, pan, 0.0);
+    }
+
+    const auto rSmooth = gf::QualityMetrics::evaluateOmegaSequence(smoothOmega, fps, &zoomUsed, 0.1);
+    const auto rShaky = gf::QualityMetrics::evaluateOmegaSequence(shakyOmega, fps, &zoomUsed, 0.1);
+    const auto rKink = gf::QualityMetrics::evaluateOmegaSequence(kinkedOmega, fps, &zoomUsed, 0.1);
+
+    assert(rSmooth.highFreqOmegaEnergyAbove2Hz < 0.01);
+    assert(rShaky.highFreqOmegaEnergyAbove2Hz > 0.10);
+    assert(rSmooth.liuStabilityScore > 0.95);
+    assert(rShaky.liuStabilityScore < rSmooth.liuStabilityScore);
+    assert(rSmooth.jerkRms < rShaky.jerkRms);
+    assert(rKink.accelDiscontinuityCount >= 2);
+    assert(std::fabs(rSmooth.meanCroppingRatio - (1.0 / 1.32)) < 1e-6);
+
+    // 2. Streaming VideoQualityAnalyzer determinism check using VirtualGyroEngine
+    const int w = 320, h = 180;
+    gf::VirtualGyroConfig vgCfg;
+    vgCfg.videoWidth = w;
+    vgCfg.videoHeight = h;
+    vgCfg.nominalFps = 30.0;
+    vgCfg.lensFx = 300.0;
+    vgCfg.lensFy = 300.0;
+    vgCfg.lensCx = 160.0;
+    vgCfg.lensCy = 90.0;
+
+    auto runStream = [&]() -> std::string {
+        gf::VideoQualityAnalyzer vqa(vgCfg);
+        std::vector<uint8_t> img(static_cast<size_t>(w * h));
+        for (int f = 0; f < 30; ++f) {
+            const double shiftX = 2.5 * std::sin(2.0 * kPi * 4.0 * (f / 30.0));
+            for (int y = 0; y < h; ++y) {
+                for (int x = 0; x < w; ++x) {
+                    const double v = evalRichPattern(x + 0.5 - shiftX, y + 0.5, w, h) * 255.0;
+                    img[static_cast<size_t>(y * w + x)] = static_cast<uint8_t>(std::min(255.0, std::max(0.0, v)));
+                }
+            }
+            assert(vqa.pushRenderedLumaFrame(img.data(), w, h, f / 30.0));
+        }
+        const auto rep = vqa.finalize(nullptr, 0.0);
+        assert(rep.hasVisualMetrics);
+        assert(rep.highFreqOmegaEnergyAbove2Hz > 1e-4);
+        assert(rep.meanInlierRatio > 0.70);
+        return gf::QualityMetrics::toJson(rep, "synthetic_stream");
+    };
+    const std::string j1 = runStream();
+    const std::string j2 = runStream();
+    assert(j1 == j2);
+
+    std::printf(
+        "QualityMetrics Test PASSED: Smooth(E>2Hz=%.4f, Liu=%.4f, Jerk=%.2f) vs Shaky(E>2Hz=%.4f, Liu=%.4f, Jerk=%.2f) | Kinks=%d\n",
+        rSmooth.highFreqOmegaEnergyAbove2Hz, rSmooth.liuStabilityScore, rSmooth.jerkRms,
+        rShaky.highFreqOmegaEnergyAbove2Hz, rShaky.liuStabilityScore, rShaky.jerkRms,
+        rKink.accelDiscontinuityCount
+    );
+}
+
+double lanczos2Weight(double x) {
+    const double ax = std::fabs(x);
+    if (ax >= 2.0) return 0.0;
+    return sincD(x) * sincD(x * 0.5);
+}
+
+double sampleLanczos2ChromaCPU(const std::vector<double>& img, int cw, int ch, double sx, double sy) {
+    const int maxX = cw - 1;
+    const int maxY = ch - 1;
+    const int ix = static_cast<int>(std::floor(sx));
+    const int iy = static_cast<int>(std::floor(sy));
+    const double fx = sx - ix;
+    const double fy = sy - iy;
+
+    double wx[4], wy[4];
+    for (int k = 0; k < 4; ++k) {
+        const double offset = static_cast<double>(k - 1);
+        wx[k] = lanczos2Weight(fx - offset);
+        wy[k] = lanczos2Weight(fy - offset);
+    }
+
+    double sum = 0.0, wSum = 0.0;
+    for (int dy = -1; dy <= 2; ++dy) {
+        const int py = std::min(maxY, std::max(0, iy + dy));
+        const double wRow = wy[dy + 1];
+        for (int dx = -1; dx <= 2; ++dx) {
+            const int px = std::min(maxX, std::max(0, ix + dx));
+            const double weight = wx[dx + 1] * wRow;
+            sum += img[static_cast<size_t>(py * cw + px)] * weight;
+            wSum += weight;
+        }
+    }
+    return std::min(1.0, std::max(0.0, sum / std::max(wSum, 1e-6)));
+}
+
+void testChroma420SitingCheckerboard() {
+    const int w = 256, h = 256;
+    const int cw = w / 2, ch = h / 2;
+    const double fx = 240.0, fy = 240.0, cx = 128.0, cy = 128.0;
+
+    // Band-limited smooth checkerboard (cell = 32 luma px) aligned identically in luma & chroma
+    auto evalChecker = [](double px, double py) -> double {
+        const double sx = std::sin(kPi * px / 32.0);
+        const double sy = std::sin(kPi * py / 32.0);
+        const double v = 0.5 + 0.42 * sx * sy;
+        return std::min(1.0, std::max(0.0, v));
+    };
+
+    auto runCase = [&](double trueOffX, double trueOffY, double shaderOffX, double shaderOffY,
+                       double zoom, double rotDeg) -> std::pair<double, double> {
+        std::vector<double> srcY(static_cast<size_t>(w * h));
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                srcY[static_cast<size_t>(y * w + x)] = evalChecker(x + 0.5, y + 0.5);
+            }
+        }
+        std::vector<double> srcC(static_cast<size_t>(cw * ch));
+        for (int cyIdx = 0; cyIdx < ch; ++cyIdx) {
+            for (int cxIdx = 0; cxIdx < cw; ++cxIdx) {
+                srcC[static_cast<size_t>(cyIdx * cw + cxIdx)] =
+                    evalChecker(2.0 * cxIdx + trueOffX, 2.0 * cyIdx + trueOffY);
+            }
+        }
+
+        float H[9];
+        const gf::Quat qRot = gf::Quat::fromAxisAngle({0.0, 0.0, 1.0}, rotDeg * (kPi / 180.0));
+        gf::FrameWarpCalculator::computeInverseHomography(qRot, fx, fy, cx, cy, zoom, H);
+
+        std::vector<double> outY(static_cast<size_t>(w * h));
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                const double dx = x + 0.5, dy = y + 0.5;
+                const double ww = H[6] * dx + H[7] * dy + H[8];
+                const double sx = (H[0] * dx + H[1] * dy + H[2]) / ww - 0.5;
+                const double sy = (H[3] * dx + H[4] * dy + H[5]) / ww - 0.5;
+                outY[static_cast<size_t>(y * w + x)] = sampleLanczos4CasCPU(srcY, w, h, sx, sy, 0.0, zoom);
+            }
+        }
+
+        std::vector<double> outC(static_cast<size_t>(cw * ch));
+        for (int gy = 0; gy < ch; ++gy) {
+            for (int gx = 0; gx < cw; ++gx) {
+                const double lx = 2.0 * gx + shaderOffX;
+                const double ly = 2.0 * gy + shaderOffY;
+                const double ww = H[6] * lx + H[7] * ly + H[8];
+                const double sx = ((H[0] * lx + H[1] * ly + H[2]) / ww - shaderOffX) * 0.5;
+                const double sy = ((H[3] * lx + H[4] * ly + H[5]) / ww - shaderOffY) * 0.5;
+                outC[static_cast<size_t>(gy * cw + gx)] = sampleLanczos2ChromaCPU(srcC, cw, ch, sx, sy);
+            }
+        }
+
+        // Measure horizontal & vertical 50%-crossing edge position error in output luma pixels
+        // along row y=144 (vertical transition near x=128) and col x=144 (horizontal transition near y=128)
+        auto findCross = [](const std::vector<double>& line) -> double {
+            for (size_t i = 1; i < line.size(); ++i) {
+                if ((line[i - 1] - 0.5) * (line[i] - 0.5) <= 0.0 && std::fabs(line[i] - line[i - 1]) > 0.01) {
+                    const double t = (0.5 - line[i - 1]) / (line[i] - line[i - 1]);
+                    return static_cast<double>(i - 1) + t;
+                }
+            }
+            return -1.0;
+        };
+
+        std::vector<double> lineY_h, lineC_h;
+        for (int x = 96; x < 160; ++x) {
+            if (std::fabs(trueOffY - 1.0) < 0.25) {
+                lineY_h.push_back(0.5 * (outY[static_cast<size_t>(144 * w + x)] + outY[static_cast<size_t>(145 * w + x)]));
+            } else {
+                lineY_h.push_back(outY[static_cast<size_t>(144 * w + x)]);
+            }
+        }
+        for (int gx = 48; gx < 80; ++gx) {
+            lineC_h.push_back(outC[static_cast<size_t>(72 * cw + gx)]);
+        }
+        const double crossY_x = 96.0 + findCross(lineY_h) + 0.5;
+        const double crossC_x = 2.0 * (48.0 + findCross(lineC_h)) + trueOffX;
+
+        std::vector<double> lineY_v, lineC_v;
+        for (int y = 96; y < 160; ++y) {
+            if (std::fabs(trueOffX - 1.0) < 0.25) {
+                lineY_v.push_back(0.5 * (outY[static_cast<size_t>(y * w + 144)] + outY[static_cast<size_t>(y * w + 145)]));
+            } else {
+                lineY_v.push_back(outY[static_cast<size_t>(y * w + 144)]);
+            }
+        }
+        for (int gy = 48; gy < 80; ++gy) {
+            lineC_v.push_back(outC[static_cast<size_t>(gy * cw + 72)]);
+        }
+        const double crossY_y = 96.0 + findCross(lineY_v) + 0.5;
+        const double crossC_y = 2.0 * (48.0 + findCross(lineC_v)) + trueOffY;
+
+        return {std::fabs(crossY_x - crossC_x), std::fabs(crossY_y - crossC_y)};
+    };
+
+    // Legacy hardcoded Center(1.0, 1.0) on Left-sited (0.5, 1.0) 4:2:0 at 2.0x zoom leaks ~0.50 luma px (=0.25 source luma px)!
+    const auto legacyErr = runCase(0.5, 1.0, 1.0, 1.0, 2.0, 0.0);
+    assert(legacyErr.first > 0.25);
+
+    // Fixed siting-aware sampling on Left-sited (0.5, 1.0), Center-sited (1.0, 1.0), and rotated 1.32x
+    const auto leftIdErr = runCase(0.5, 1.0, 0.5, 1.0, 1.0, 0.0);
+    const auto leftZoomErr = runCase(0.5, 1.0, 0.5, 1.0, 2.0, 0.0);
+    const auto leftRotErr = runCase(0.5, 1.0, 0.5, 1.0, 1.32, 8.0);
+    const auto centerZoomErr = runCase(1.0, 1.0, 1.0, 1.0, 2.0, 0.0);
+
+    std::printf(
+        "Chroma 4:2:0 Siting Errors -> LegacyLeft@2x=(%.4f, %.4f) | Left@1x=(%.4f, %.4f) | Left@2x=(%.4f, %.4f) | LeftRot8@1.32x=(%.4f, %.4f) | Center@2x=(%.4f, %.4f)\n",
+        legacyErr.first, legacyErr.second,
+        leftIdErr.first, leftIdErr.second,
+        leftZoomErr.first, leftZoomErr.second,
+        leftRotErr.first, leftRotErr.second,
+        centerZoomErr.first, centerZoomErr.second
+    );
+
+    assert(leftIdErr.first < 0.05 && leftIdErr.second < 0.05);
+    assert(leftZoomErr.first < 0.08 && leftZoomErr.second < 0.05);
+    assert(leftRotErr.first < 0.10 && leftRotErr.second < 0.08);
+    assert(centerZoomErr.first < 0.05 && centerZoomErr.second < 0.05);
+}
+
+void testPtsIntegrityValidation() {
+    // 1. Uniform monotonic 30fps and 120fps streams
+    std::vector<double> in30, out30;
+    for (int i = 0; i < 180; ++i) {
+        const double t = static_cast<double>(i) / 30.0;
+        in30.push_back(t);
+        out30.push_back(t);
+    }
+    const auto p30 = gf::QualityMetrics::validatePtsIntegrity(in30, out30, 30.0);
+    assert(p30.passed);
+    assert(p30.nonMonotonicCount == 0);
+    assert(p30.duplicateFrameCount == 0);
+    assert(p30.writerDroppedCount == 0);
+    assert(p30.stdDevDtMs < 1e-4);
+    assert(p30.maxInputOutputStepDriftMs < 1e-4);
+
+    std::vector<double> in120, out120;
+    for (int i = 0; i < 240; ++i) {
+        const double t = static_cast<double>(i) / 120.0;
+        in120.push_back(t);
+        out120.push_back(t);
+    }
+    const auto p120 = gf::QualityMetrics::validatePtsIntegrity(in120, out120, 120.0);
+    assert(p120.passed);
+    assert(std::fabs(p120.meanDtMs - (1000.0 / 120.0)) < 1e-3);
+
+    // 2. Duplicate / zero-dt frame detection
+    auto outDup = out30;
+    outDup[50] = outDup[49];
+    const auto pDup = gf::QualityMetrics::validatePtsIntegrity(in30, outDup, 30.0);
+    assert(!pDup.passed);
+    assert(pDup.nonMonotonicCount >= 1);
+
+    // 3. Near-duplicate frame (dt < 0.35 / fps)
+    auto outNearDup = out30;
+    outNearDup[50] = outNearDup[49] + 0.002;
+    const auto pNearDup = gf::QualityMetrics::validatePtsIntegrity(in30, outNearDup, 30.0);
+    assert(!pNearDup.passed);
+    assert(pNearDup.duplicateFrameCount >= 1);
+
+    // 4. Dropped frame by writer
+    auto outDrop = out30;
+    outDrop.erase(outDrop.begin() + 60);
+    const auto pDrop = gf::QualityMetrics::validatePtsIntegrity(in30, outDrop, 30.0);
+    assert(!pDrop.passed);
+    assert(pDrop.writerDroppedCount == 1);
+
+    // 5. Interval drift (jittery writer timestamps)
+    auto outDrift = out30;
+    outDrift[80] += 0.004;
+    const auto pDrift = gf::QualityMetrics::validatePtsIntegrity(in30, outDrift, 30.0);
+    assert(!pDrift.passed);
+    assert(pDrift.maxInputOutputStepDriftMs > 3.5);
+
+    std::printf(
+        "PTS Integrity Test PASSED: 30fps(dt=%.3fms, drift=%.4fms), 120fps(dt=%.3fms) | Detected dup/drop/drift failures.\n",
+        p30.meanDtMs, p30.maxInputOutputStepDriftMs, p120.meanDtMs
+    );
+}
+
+void testTemporalSharpeningStability() {
+    const int w = 64, h = 64;
+    const int nFrames = 60;
+    const double fps = 30.0;
+    const double sharpenStrength = 0.75;
+
+    std::vector<double> zoomCurve(static_cast<size_t>(nFrames), 1.0);
+    for (int t = 0; t < nFrames; ++t) {
+        zoomCurve[static_cast<size_t>(t)] = 1.28 + 0.14 * std::sin(2.0 * kPi * 4.0 * static_cast<double>(t) / fps);
+    }
+    const std::vector<double> zoomLPF = gf::QualityMetrics::lowPassFilterZoomSub1Hz(zoomCurve, fps, 0.65);
+    assert(zoomLPF.size() == zoomCurve.size());
+
+    double rawZoomMin = 10.0, rawZoomMax = 0.0;
+    double lpfZoomMin = 10.0, lpfZoomMax = 0.0;
+    for (int t = 6; t < nFrames - 6; ++t) {
+        rawZoomMin = std::min(rawZoomMin, zoomCurve[static_cast<size_t>(t)]);
+        rawZoomMax = std::max(rawZoomMax, zoomCurve[static_cast<size_t>(t)]);
+        lpfZoomMin = std::min(lpfZoomMin, zoomLPF[static_cast<size_t>(t)]);
+        lpfZoomMax = std::max(lpfZoomMax, zoomLPF[static_cast<size_t>(t)]);
+    }
+    assert((lpfZoomMax - lpfZoomMin) < 0.15 * (rawZoomMax - rawZoomMin));
+
+    // Base synthetic image: flat mid-gray region [0..39] + crisp step edge (0.25 -> 0.75 at x=48)
+    std::vector<double> baseImg(static_cast<size_t>(w * h), 0.42);
+    for (int y = 0; y < h; ++y) {
+        for (int x = 40; x < w; ++x) {
+            baseImg[static_cast<size_t>(y * w + x)] = (x < 48) ? 0.25 : 0.75;
+        }
+    }
+
+    auto xorshift = [](uint32_t& s) -> uint32_t {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        return s;
+    };
+    auto randNormal = [&](uint32_t& s) -> double {
+        double sum = 0.0;
+        for (int k = 0; k < 4; ++k) {
+            sum += static_cast<double>(xorshift(s) & 0xFFFFu) / 65535.0;
+        }
+        return (sum - 2.0) * std::sqrt(3.0);
+    };
+
+    const int roiX0 = 12, roiX1 = 30, roiY0 = 16, roiY1 = 48;
+    const size_t roiCount = static_cast<size_t>((roiX1 - roiX0) * (roiY1 - roiY0));
+    std::vector<double> prevDeltaLeg(roiCount, 0.0);
+    std::vector<double> prevDeltaNew(roiCount, 0.0);
+    double flickerVarLeg = 0.0;
+    double flickerVarNew = 0.0;
+    size_t diffSamples = 0;
+
+    for (int t = 0; t < nFrames; ++t) {
+        std::vector<double> noisy = baseImg;
+        uint32_t rng = 987654321u + static_cast<uint32_t>(t) * 2654435761u;
+        for (size_t idx = 0; idx < noisy.size(); ++idx) {
+            noisy[idx] = std::min(1.0, std::max(0.0, baseImg[idx] + 0.020 * randNormal(rng)));
+        }
+
+        const double jx = 0.20 * std::sin(2.1 * static_cast<double>(t));
+        const double jy = 0.18 * std::cos(1.7 * static_cast<double>(t));
+
+        size_t p = 0;
+        for (int y = roiY0; y < roiY1; ++y) {
+            for (int x = roiX0; x < roiX1; ++x, ++p) {
+                const double sx = static_cast<double>(x) + jx;
+                const double sy = static_cast<double>(y) + jy;
+                const double valBase = sampleLanczos4CasCPU(noisy, w, h, sx, sy, 0.0, 1.0, false);
+                const double valLeg = sampleLanczos4CasCPU(noisy, w, h, sx, sy, sharpenStrength, zoomCurve[static_cast<size_t>(t)], true);
+                const double valNew = sampleLanczos4CasCPU(noisy, w, h, sx, sy, sharpenStrength, zoomLPF[static_cast<size_t>(t)], false);
+
+                const double dLeg = valLeg - valBase;
+                const double dNew = valNew - valBase;
+                if (t > 0) {
+                    const double diffLeg = dLeg - prevDeltaLeg[p];
+                    const double diffNew = dNew - prevDeltaNew[p];
+                    flickerVarLeg += diffLeg * diffLeg;
+                    flickerVarNew += diffNew * diffNew;
+                    ++diffSamples;
+                }
+                prevDeltaLeg[p] = dLeg;
+                prevDeltaNew[p] = dNew;
+            }
+        }
+    }
+
+    flickerVarLeg /= static_cast<double>(std::max<size_t>(1, diffSamples));
+    flickerVarNew /= static_cast<double>(std::max<size_t>(1, diffSamples));
+    const double reductionPct = (1.0 - flickerVarNew / std::max(1e-18, flickerVarLeg)) * 100.0;
+
+    // Verify step-edge contrast preservation at x=46..49 on noiseless frame
+    const double baseEdgeLow = sampleLanczos4CasCPU(baseImg, w, h, 46.2, 32.0, 0.0, 1.0, false);
+    const double baseEdgeHigh = sampleLanczos4CasCPU(baseImg, w, h, 48.8, 32.0, 0.0, 1.0, false);
+    const double c2EdgeLow = sampleLanczos4CasCPU(baseImg, w, h, 46.2, 32.0, sharpenStrength, zoomLPF[30], false);
+    const double c2EdgeHigh = sampleLanczos4CasCPU(baseImg, w, h, 48.8, 32.0, sharpenStrength, zoomLPF[30], false);
+    const double edgeBase = baseEdgeHigh - baseEdgeLow;
+    const double edgeC2 = c2EdgeHigh - c2EdgeLow;
+
+    std::printf(
+        "Temporal Sharpening Stability PASSED: FlickerVar %.2e -> %.2e (%.1f%% reduction) | EdgeContrast %.3f -> %.3f | LPF ZoomSpan %.3f -> %.3f\n",
+        flickerVarLeg, flickerVarNew, reductionPct, edgeBase, edgeC2,
+        rawZoomMax - rawZoomMin, lpfZoomMax - lpfZoomMin
+    );
+    assert(reductionPct > 50.0);
+    assert(edgeC2 >= 0.95 * edgeBase);
+}
+
 } // namespace
 
 int main() {
@@ -382,5 +803,9 @@ int main() {
     testSinglePassResamplingFidelity(rotPsnr, rotSsim);
     testTemporalFullFrameEdgeFill();
     testFinalBenchmarkScorecard(rotPsnr, rotSsim);
+    testQualityMetricsAndVideoAnalyzer();
+    testChroma420SitingCheckerboard();
+    testPtsIntegrityValidation();
+    testTemporalSharpeningStability();
     return 0;
 }

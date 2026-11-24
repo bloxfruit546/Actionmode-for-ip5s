@@ -1,0 +1,7 @@
+{
+	"InstallScripts" : 
+	[
+		"X:/GyroStabilizer5s/build_winlibs/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

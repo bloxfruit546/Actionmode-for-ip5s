@@ -1,3 +1,4 @@
+#include "CalibrationRefiner.hpp"
 #include "FrameWarpCalculator.hpp"
 #include "OpticalSync.hpp"
 #include "SidecarIO.hpp"
@@ -1812,6 +1813,163 @@ void testPhaseBTranslational2DFootstepAndSign() {
                 res2D.validFrameCount, maxResidualPx, warp.maxZoom);
 }
 
+void testCalibrationRefinerAccuracyDriftAndFallback() {
+    const int w = 480, h = 270;
+    const double fullW = 1920.0, fullH = 1080.0;
+    const double scaleSim = static_cast<double>(w) / fullW;
+    const double fxFull = 1815.0, fyFull = 1815.0, cxFull = 960.0, cyFull = 540.0;
+    const double fxSim = fxFull * scaleSim, fySim = fyFull * scaleSim;
+    const double cxSim = cxFull * scaleSim, cySim = cyFull * scaleSim;
+
+    auto evalOmega = [](double t) -> gf::Vec3 {
+        return {
+            0.55 * std::cos(2.0 * kPi * 1.4 * t) + 0.25 * std::sin(2.0 * kPi * 3.1 * t),
+            0.65 * std::sin(2.0 * kPi * 1.1 * t) + 0.20 * std::cos(2.0 * kPi * 2.7 * t),
+            0.35 * std::sin(2.0 * kPi * 1.7 * t + 0.4)
+        };
+    };
+
+    const double tStart = 5.0;
+    const double durationSec = 6.0;
+    const double fps = 30.0;
+    const double simStart = tStart - 0.15;
+    const double simEnd = tStart + durationSec + 0.15;
+    const double simDt = 1.0 / 480.0;
+    const int simSteps = static_cast<int>(std::ceil((simEnd - simStart) / simDt)) + 1;
+    std::vector<gf::Quat> trueQ(static_cast<size_t>(simSteps), gf::Quat::identity());
+    for (int i = 1; i < simSteps; ++i) {
+        const double tMid = simStart + (static_cast<double>(i) - 0.5) * simDt;
+        trueQ[static_cast<size_t>(i)] = gf::Quat::integrateGyroStep(trueQ[static_cast<size_t>(i - 1)], evalOmega(tMid - tStart), simDt);
+    }
+    auto sampleQ = [&](double t) -> gf::Quat {
+        const double pos = (t - simStart) / simDt;
+        if (pos <= 0.0) return trueQ.front();
+        const int i0 = std::min(simSteps - 2, static_cast<int>(std::floor(pos)));
+        const double a = std::min(1.0, std::max(0.0, pos - i0));
+        return gf::Quat::slerp(trueQ[static_cast<size_t>(i0)], trueQ[static_cast<size_t>(i0 + 1)], a);
+    };
+
+    const double trueOffA = 8.4; // ms
+    const double trueOffB = 0.65; // ms/s linear clock drift
+    const double trueScale[3] = {1.032, 0.974, 1.022};
+    const double trueBias[3] = {0.015, -0.012, 0.009};
+    const double trueRsSec = 0.0152;
+
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.width = 1920; hdr.height = 1080; hdr.nominal_fps = fps;
+    hdr.readout_time_sec = 0.0152;
+    hdr.lens_fx = fxFull; hdr.lens_fy = fyFull; hdr.lens_cx = cxFull; hdr.lens_cy = cyFull;
+
+    std::vector<gf::GFGyroRecord> gyro;
+    for (int i = 0; i < 760; ++i) {
+        const double tGyro = (tStart - 0.12) + static_cast<double>(i) / 120.0;
+        const double deltaSec = (trueOffA + trueOffB * (tGyro - tStart)) * 0.001;
+        const double tPhys = tGyro - deltaSec;
+        const gf::Vec3 wTrue = evalOmega(tPhys - tStart);
+        const double wxM = trueScale[0] * wTrue.x + trueBias[0];
+        const double wyM = trueScale[1] * wTrue.y + trueBias[1];
+        const double wzM = trueScale[2] * wTrue.z + trueBias[2];
+        gyro.push_back({tGyro, -wyM, -wxM, -wzM});
+    }
+
+    const int nFrames = 180;
+    std::vector<gf::GFFrameRecord> frames;
+    frames.reserve(nFrames);
+    for (int f = 0; f < nFrames; ++f) {
+        frames.push_back({static_cast<uint32_t>(f), tStart + f / fps, 0.004f, 100.0f, 0.7f, static_cast<float>(trueRsSec)});
+    }
+
+    gf::CalibrationRefiner refiner;
+    gf::CalibrationModePrior prior;
+    refiner.reset(hdr, gyro, frames, &prior, nullptr, false);
+
+    std::vector<uint8_t> luma(static_cast<size_t>(w * h));
+    for (int f = 0; f < nFrames; ++f) {
+        const double tMid = frames[f].pts_sec + 0.5 * 0.004 + 0.5 * trueRsSec;
+        for (int y = 0; y < h; ++y) {
+            const double rowNorm = (static_cast<double>(y) / (h - 1)) - 0.5;
+            const gf::Quat qRow = sampleQ(tMid + rowNorm * trueRsSec);
+            for (int x = 0; x < w; ++x) {
+                const double xn = (x + 0.5 - cxSim) / fxSim;
+                const double yn = (y + 0.5 - cySim) / fySim;
+                const gf::Vec3 rw = qRow.rotateVector(gf::Vec3(xn, yn, 1.0).normalized());
+                const double val = 128.0
+                    + 45.0 * std::sin(rw.x * 24.0 + rw.y * 17.0)
+                    + 35.0 * std::cos(rw.x * 39.0 - rw.y * 28.0)
+                    + 25.0 * std::sin(rw.y * 51.0 + rw.z * 14.0);
+                luma[static_cast<size_t>(y * w + x)] = static_cast<uint8_t>(std::min(255.0, std::max(0.0, val)));
+            }
+        }
+        assert(refiner.pushDownsampledLumaFrame(luma.data(), w, h, frames[f].pts_sec, static_cast<size_t>(f)));
+    }
+
+    const gf::RefinedCalibration cal = refiner.finalize();
+    assert(cal.valid);
+    assert(!cal.usedPriorFallback);
+    assert(cal.confidence >= 0.65);
+
+    const double errOffA = std::fabs(cal.offsetA - trueOffA);
+    const double errOffEnd = std::fabs((cal.offsetA + cal.offsetB * durationSec) - (trueOffA + trueOffB * durationSec));
+    const double errBias0 = std::fabs(cal.bias[0] - trueBias[0]);
+    const double errBias1 = std::fabs(cal.bias[1] - trueBias[1]);
+    const double errBias2 = std::fabs(cal.bias[2] - trueBias[2]);
+    const double errScale0 = std::fabs(cal.scale[0] - trueScale[0]) / trueScale[0];
+    const double errScale1 = std::fabs(cal.scale[1] - trueScale[1]) / trueScale[1];
+    const double errScale2 = std::fabs(cal.scale[2] - trueScale[2]) / trueScale[2];
+
+    std::printf(
+        "CalibrationRefiner Test: off=(%.2f+%.2ft vs %.2f+%.2ft) bias=(%.4f,%.4f,%.4f) scale=(%.4f,%.4f,%.4f) RS=%.2fms RMS %.4f->%.4f\n",
+        cal.offsetA, cal.offsetB, trueOffA, trueOffB,
+        cal.bias[0], cal.bias[1], cal.bias[2],
+        cal.scale[0], cal.scale[1], cal.scale[2],
+        cal.readoutMs, cal.residualRmsBefore, cal.residualRmsAfter
+    );
+
+    assert(errOffA < 1.0);
+    assert(errOffEnd < 1.0);
+    assert(errBias0 < 0.003 && errBias1 < 0.003 && errBias2 < 0.003);
+    assert(errScale0 < 0.01 && errScale1 < 0.01 && errScale2 < 0.01);
+    assert(cal.residualRmsAfter < cal.residualRmsBefore * 0.75);
+    assert(cal.residualRmsAfter < 0.018);
+    assert(std::fabs(cal.readoutMs - trueRsSec * 1000.0) < 2.5);
+
+    // JSON round-trip check
+    gf::RefinedCalibration parsed;
+    assert(gf::RefinedCalibration::fromJson(cal.toJson(), parsed));
+    assert(std::fabs(parsed.offsetA - cal.offsetA) < 1e-4);
+    assert(std::fabs(parsed.scale[1] - cal.scale[1]) < 1e-4);
+
+    // Low-texture clip must fall back cleanly to prior without corrupting scale
+    gf::CalibrationModePrior customPrior;
+    customPrior.hasPrior = true;
+    customPrior.readoutMs = 15.1;
+    customPrior.focalScale = 1.01;
+    customPrior.scale[0] = 1.005; customPrior.scale[1] = 0.995; customPrior.scale[2] = 1.002;
+    gf::CalibrationRefiner lowTexRefiner;
+    lowTexRefiner.reset(hdr, gyro, frames, &customPrior, nullptr, false);
+    std::vector<uint8_t> flatImg(static_cast<size_t>(w * h), 128);
+    for (int f = 0; f < 60; ++f) {
+        lowTexRefiner.pushDownsampledLumaFrame(flatImg.data(), w, h, frames[f].pts_sec, static_cast<size_t>(f));
+    }
+    const gf::RefinedCalibration lowTexCal = lowTexRefiner.finalize();
+    assert(lowTexCal.valid);
+    assert(lowTexCal.usedPriorFallback);
+    assert(std::fabs(lowTexCal.scale[0] - customPrior.scale[0]) < 1e-6);
+    assert(std::fabs(lowTexCal.readoutMs - customPrior.readoutMs) < 1e-6);
+
+    // Running median prior check
+    const auto medPrior = gf::CalibrationRefiner::computeModePriorFromHistory(
+        {15.0, 15.4, 15.2}, {1.00, 1.02, 1.01}, {1.01, 1.03, 1.02}, {0.98, 0.99, 0.97}, {1.00, 1.01, 1.02}
+    );
+    assert(medPrior.hasPrior);
+    assert(std::fabs(medPrior.readoutMs - 15.2) < 1e-6);
+    assert(std::fabs(medPrior.focalScale - 1.01) < 1e-6);
+    assert(std::fabs(medPrior.scale[0] - 1.02) < 1e-6);
+    std::printf("CalibrationRefiner Accuracy, Drift, Prior-Fallback & Median Tests PASSED.\n");
+}
+
 } // namespace
 
 int main() {
@@ -1836,5 +1994,6 @@ int main() {
     testPortraitIntrinsicsAndZeroZoomSpike();
     test720p60ActionPipeline();
     testPhaseBTranslational2DFootstepAndSign();
+    testCalibrationRefinerAccuracyDriftAndFallback();
     return 0;
 }

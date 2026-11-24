@@ -233,23 +233,43 @@ bool VirtualGyroEngine::pushLumaFrame(const uint8_t* luma, int width, int height
 
     VisualOmegaSample sample{};
     double inlierRatio = 0.0;
-    if (trackAndSolveRotation(prevPyr_, currPyr_, sample, inlierRatio)) {
+    int inlierCount = 0;
+    if (trackAndSolveRotation(prevPyr_, currPyr_, sample, inlierRatio, &inlierCount, nullptr)) {
         gyroSamples_.push_back(sample);
+        inlierRatios_.push_back(inlierRatio);
+        inlierCounts_.push_back(inlierCount);
         inlierRatioSum_ += inlierRatio;
         ++inlierRatioCount_;
     } else {
         VisualOmegaSample fallback{};
         fallback.timestampSec = 0.5 * (prevPyr_.timestampSec + currPyr_.timestampSec);
         gyroSamples_.push_back(fallback);
+        inlierRatios_.push_back(0.0);
+        inlierCounts_.push_back(0);
     }
 
     std::swap(prevPyr_, currPyr_);
     return true;
 }
 
+bool VirtualGyroEngine::estimateRotationBetweenPyramids(
+    const FramePyramid& prev,
+    const FramePyramid& curr,
+    const VirtualGyroConfig& config,
+    VisualOmegaSample& outSample,
+    double& outInlierRatio,
+    int* outInlierCount,
+    std::vector<TrackedPointPair>* outInlierPoints
+) {
+    VirtualGyroEngine tmp(config);
+    return tmp.trackAndSolveRotation(prev, curr, outSample, outInlierRatio, outInlierCount, outInlierPoints);
+}
+
 bool VirtualGyroEngine::trackAndSolveRotation(
     const FramePyramid& prev, const FramePyramid& curr,
-    VisualOmegaSample& outSample, double& outInlierRatio
+    VisualOmegaSample& outSample, double& outInlierRatio,
+    int* outInlierCount,
+    std::vector<TrackedPointPair>* outInlierPoints
 ) const {
     const int w = prev.levels[0].width;
     const int h = prev.levels[0].height;
@@ -446,6 +466,23 @@ bool VirtualGyroEngine::trackAndSolveRotation(
     outSample.wyCam = omegaDt[1] / dt;
     outSample.wzCam = omegaDt[2] / dt;
     outInlierRatio = static_cast<double>(bestInliers.size()) / static_cast<double>(obs.size());
+    if (outInlierCount) {
+        *outInlierCount = static_cast<int>(bestInliers.size());
+    }
+    if (outInlierPoints) {
+        outInlierPoints->clear();
+        outInlierPoints->reserve(bestInliers.size());
+        const double invScale = (scale > 1e-6) ? (1.0 / scale) : 1.0;
+        for (int idx : bestInliers) {
+            const auto& o = obs[static_cast<size_t>(idx)];
+            outInlierPoints->push_back({
+                o.u * invScale,
+                o.v * invScale,
+                (o.u + o.du) * invScale,
+                (o.v + o.dv) * invScale
+            });
+        }
+    }
     return true;
 }
 

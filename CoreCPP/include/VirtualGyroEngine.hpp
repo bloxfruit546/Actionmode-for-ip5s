@@ -39,12 +39,6 @@ struct VirtualGyroResult {
  */
 class VirtualGyroEngine {
 public:
-    explicit VirtualGyroEngine(const VirtualGyroConfig& config);
-
-    bool pushLumaFrame(const uint8_t* luma, int width, int height, double timestampSec);
-    VirtualGyroResult finalizeAndWrite(const std::string& outputSidecarPath);
-
-private:
     struct PyramidLevel {
         int width = 0;
         int height = 0;
@@ -63,8 +57,46 @@ private:
         double wzCam = 0.0;
     };
 
+    struct TrackedPointPair {
+        double u0 = 0.0;
+        double v0 = 0.0;
+        double u1 = 0.0;
+        double v1 = 0.0;
+    };
+
+    explicit VirtualGyroEngine(const VirtualGyroConfig& config);
+
+    bool pushLumaFrame(const uint8_t* luma, int width, int height, double timestampSec);
+    VirtualGyroResult finalizeAndWrite(const std::string& outputSidecarPath);
+
+    const std::vector<GFFrameRecord>& frames() const { return frames_; }
+    const std::vector<VisualOmegaSample>& estimatedSamples() const { return gyroSamples_; }
+    const std::vector<double>& sampleInlierRatios() const { return inlierRatios_; }
+    const std::vector<int>& sampleInlierCounts() const { return inlierCounts_; }
+    double meanInlierRatio() const {
+        return (inlierRatioCount_ > 0) ? (inlierRatioSum_ / static_cast<double>(inlierRatioCount_)) : 0.0;
+    }
+
     static void buildPyramid(const uint8_t* luma, int width, int height, double ts, FramePyramid& outPyr);
-    bool trackAndSolveRotation(const FramePyramid& prev, const FramePyramid& curr, VisualOmegaSample& outSample, double& outInlierRatio) const;
+    static bool estimateRotationBetweenPyramids(
+        const FramePyramid& prev,
+        const FramePyramid& curr,
+        const VirtualGyroConfig& config,
+        VisualOmegaSample& outSample,
+        double& outInlierRatio,
+        int* outInlierCount = nullptr,
+        std::vector<TrackedPointPair>* outInlierPoints = nullptr
+    );
+
+private:
+    bool trackAndSolveRotation(
+        const FramePyramid& prev,
+        const FramePyramid& curr,
+        VisualOmegaSample& outSample,
+        double& outInlierRatio,
+        int* outInlierCount = nullptr,
+        std::vector<TrackedPointPair>* outInlierPoints = nullptr
+    ) const;
 
     VirtualGyroConfig config_;
     bool hasPrevFrame_ = false;
@@ -72,6 +104,8 @@ private:
     FramePyramid currPyr_;
     std::vector<GFFrameRecord> frames_;
     std::vector<VisualOmegaSample> gyroSamples_;
+    std::vector<double> inlierRatios_;
+    std::vector<int> inlierCounts_;
     double inlierRatioSum_ = 0.0;
     size_t inlierRatioCount_ = 0;
 };

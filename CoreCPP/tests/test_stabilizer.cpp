@@ -1,8 +1,11 @@
+#include "ConstrainedPathOptimizer.hpp"
 #include "FrameWarpCalculator.hpp"
+#include "QualityMetrics.hpp"
 #include "TrajectoryEngine.hpp"
 #include "TranslationalStabilizer2D.hpp"
 
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -588,6 +591,246 @@ void testHorizontalShakeSuppressionPortraitAndLandscape() {
     std::printf("testHorizontalShakeSuppressionPortraitAndLandscape (Portrait 90 deg shake >92%% & Landscape 0 deg RMS <0.8px) PASSED\n");
 }
 
+void testConstrainedPathShakeAndPanZeroBorder() {
+    gf::CalibrationProfile prof = gf::CalibrationProfile::defaultIPhone5s1080p30();
+    prof.k1 = 0.0;
+    prof.k2 = 0.0;
+    prof.readoutTimeSec = 0.0152;
+
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.width = 1920;
+    hdr.height = 1080;
+    hdr.nominal_fps = 30.0;
+    hdr.readout_time_sec = 0.0152;
+    hdr.lens_fx = prof.fx;
+    hdr.lens_fy = prof.fy;
+    hdr.lens_cx = prof.cx;
+    hdr.lens_cy = prof.cy;
+
+    const double duration = 5.5;
+    const double imuHz = 90.0;
+    const int nImu = static_cast<int>(duration * imuHz);
+    const int nFrames = static_cast<int>(duration * 30.0);
+
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    gyro.reserve(static_cast<size_t>(nImu));
+    accel.reserve(static_cast<size_t>(nImu));
+
+    const double pitchAmp = 9.0 * (kPi / 180.0); // +-9 deg shake exceeds 1.30x crop envelope
+    const double yawAmp = 4.2 * (kPi / 180.0);
+    const double wPan = 30.0 * (kPi / 180.0);    // 30 deg/s constant-velocity pan segment
+
+    for (int i = 0; i < nImu; ++i) {
+        const double t = i / imuHz;
+        double panYaw = 0.0;
+        if (t > 1.4 && t < 4.1) {
+            const double u1 = std::min(1.0, std::max(0.0, (t - 1.4) / 0.25));
+            const double u2 = std::min(1.0, std::max(0.0, (4.1 - t) / 0.25));
+            panYaw = wPan * (u1 * u1 * (3.0 - 2.0 * u1)) * (u2 * u2 * (3.0 - 2.0 * u2));
+        }
+        const double wx = pitchAmp * (2.0 * kPi * 3.2) * std::cos(2.0 * kPi * 3.2 * t);
+        const double wy = panYaw + yawAmp * (2.0 * kPi * 4.0) * std::cos(2.0 * kPi * 4.0 * t);
+        gyro.push_back({t, -wy, -wx, 0.0});
+        accel.push_back({t, -1.0f, 0.0f, 0.0f}); // Landscape gravity (+Y_cam)
+    }
+
+    std::vector<gf::GFFrameRecord> frames;
+    frames.reserve(static_cast<size_t>(nFrames));
+    for (int f = 0; f < nFrames; ++f) {
+        frames.push_back({static_cast<uint32_t>(f), f / 30.0, 0.005f, 100.0f, 0.88f, 0.0152f});
+    }
+
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel);
+
+    gf::StabilizerConfig cfgOld;
+    cfgOld.pitchSmoothness = 0.78;
+    cfgOld.yawSmoothness = 0.88;
+    cfgOld.rollSmoothness = 0.85;
+    cfgOld.horizonLockEnabled = true;
+    cfgOld.horizonMode = gf::HorizonMode::ActionLevel40;
+    cfgOld.rollingShutterCorrection = true;
+    cfgOld.dynamicZoomEnabled = false;
+    cfgOld.maxZoomLimit = 1.30;
+    cfgOld.useConstrainedPath = false;
+    cfgOld.calibWidth = prof.width;
+    cfgOld.calibHeight = prof.height;
+    cfgOld.calibFx = prof.fx;
+    cfgOld.calibFy = prof.fy;
+    cfgOld.calibCx = prof.cx;
+    cfgOld.calibCy = prof.cy;
+    cfgOld.calibReadoutSec = prof.readoutTimeSec;
+
+    gf::StabilizerConfig cfgNew = cfgOld;
+    cfgNew.useConstrainedPath = true;
+
+    const auto trajOld = engine.solve(frames, cfgOld);
+    const auto trajNew = engine.solve(frames, cfgNew);
+    assert(trajOld.valid && trajNew.valid);
+
+    const auto warpNew = gf::FrameWarpCalculator::computeAllFramesWithRollingShutter(
+        engine, trajNew, prof, 30.0, cfgNew.maxZoomLimit, true, false
+    );
+    assert(warpNew.maxZoom <= cfgNew.maxZoomLimit + 1e-3);
+
+    // Verify 0% black border across ALL RS slices on every frame
+    const double corners[4][2] = {{0.0, 0.0}, {1919.0, 0.0}, {1919.0, 1079.0}, {0.0, 1079.0}};
+    for (const auto& lut : warpNew.frameLUTs) {
+        const int testSlices[3] = {0, gf::kRollingShutterSlices / 2, gf::kRollingShutterSlices - 1};
+        for (int s : testSlices) {
+            const float* m = lut.sliceH[s];
+            for (int c = 0; c < 4; ++c) {
+                const double u = corners[c][0];
+                const double v = corners[c][1];
+                const double pw = m[6] * u + m[7] * v + m[8];
+                assert(pw > 0.0);
+                const double us = (m[0] * u + m[1] * v + m[2]) / pw;
+                const double vs = (m[3] * u + m[4] * v + m[5]) / pw;
+                assert(us >= 0.0 && us <= 1919.0);
+                assert(vs >= 0.0 && vs <= 1079.0);
+            }
+        }
+    }
+
+    // Verify constant-velocity pan plateau in [2.0s..3.5s] (frames 60..105)
+    std::vector<double> plateauWy;
+    double wySum = 0.0;
+    for (size_t f = 60; f < 105; ++f) {
+        const gf::Vec3 w = quatLog((trajNew.smoothFrameQuats[f].conjugate() * trajNew.smoothFrameQuats[f + 1]).normalized()) * 30.0;
+        plateauWy.push_back(w.y);
+        wySum += w.y;
+    }
+    const double wyMean = wySum / static_cast<double>(plateauWy.size());
+    double wyVar = 0.0;
+    for (double v : plateauWy) wyVar += (v - wyMean) * (v - wyMean);
+    const double wyStd = std::sqrt(wyVar / static_cast<double>(plateauWy.size()));
+    assert(std::fabs(wyMean - wPan) < 0.08);
+    assert(wyStd < 0.06);
+
+    const auto repOld = gf::QualityMetrics::evaluateTrajectory(trajOld.smoothFrameQuats, 30.0, nullptr, trajOld.maxOutputRollErrorDeg, 3.0);
+    const auto repNew = gf::QualityMetrics::evaluateTrajectory(trajNew.smoothFrameQuats, 30.0, nullptr, trajNew.maxOutputRollErrorDeg, 3.0);
+    std::printf(
+        "ConstrainedPath Shake+Pan A/B: JerkRMS %.2f -> %.2f | AccelJumps %d -> %d | PanPlateau=%.3f+-%.4f rad/s | MaxZoom=%.3fx\n",
+        repOld.jerkRms, repNew.jerkRms,
+        repOld.accelDiscontinuityCount, repNew.accelDiscontinuityCount,
+        wyMean, wyStd, warpNew.maxZoom
+    );
+    assert(repNew.jerkRms < repOld.jerkRms);
+    assert(repNew.accelDiscontinuityCount < repOld.accelDiscontinuityCount);
+    assert(trajNew.maxOutputRollErrorDeg < 0.5);
+}
+
+void testConstrainedPathPreservesSmoothInput() {
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.width = 1920;
+    hdr.height = 1080;
+    hdr.nominal_fps = 30.0;
+
+    // 1.0s tripod hold + 2.5s ultra-clean constant 20 deg/s pan + 1.0s hold (ZERO shake)
+    const double duration = 4.5;
+    const double imuHz = 90.0;
+    const int nImu = static_cast<int>(duration * imuHz);
+    const int nFrames = static_cast<int>(duration * 30.0);
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    const double wPan = 20.0 * (kPi / 180.0);
+
+    for (int i = 0; i < nImu; ++i) {
+        const double t = i / imuHz;
+        double wy = 0.0;
+        if (t > 1.0 && t < 3.5) {
+            wy = wPan;
+        }
+        gyro.push_back({t, -wy, 0.0, 0.0});
+        accel.push_back({t, 0.0f, -1.0f, 0.0f});
+    }
+
+    std::vector<gf::GFFrameRecord> frames;
+    for (int f = 0; f < nFrames; ++f) {
+        frames.push_back({static_cast<uint32_t>(f), f / 30.0, 0.005f, 100.0f, 0.88f, 0.0});
+    }
+
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel);
+    gf::StabilizerConfig cfg;
+    cfg.pitchSmoothness = 0.78;
+    cfg.yawSmoothness = 0.88;
+    cfg.rollSmoothness = 0.85;
+    cfg.horizonLockEnabled = true;
+    cfg.horizonMode = gf::HorizonMode::ActionLevel40;
+    cfg.maxZoomLimit = 1.32;
+    cfg.useConstrainedPath = true;
+
+    const auto traj = engine.solve(frames, cfg);
+    assert(traj.valid);
+
+    double sqErrDeg = 0.0;
+    for (size_t f = 0; f < traj.rawFrameQuats.size(); ++f) {
+        const double errDeg = rotationAngleBetween(traj.rawFrameQuats[f], traj.smoothFrameQuats[f]) * (180.0 / kPi);
+        sqErrDeg += errDeg * errDeg;
+    }
+    const double rmsDiffDeg = std::sqrt(sqErrDeg / static_cast<double>(traj.rawFrameQuats.size()));
+    std::printf("ConstrainedPath SmoothInput Preservation RMS diff = %.4f deg (< 0.25 deg)\n", rmsDiffDeg);
+    assert(rmsDiffDeg < 0.25);
+}
+
+void testConstrainedPathPerformance60Sec() {
+    gf::GFFileHeader hdr{};
+    std::memcpy(hdr.magic, "GFS5", 4);
+    hdr.version = 2;
+    hdr.width = 1920;
+    hdr.height = 1080;
+    hdr.nominal_fps = 30.0;
+    hdr.readout_time_sec = 0.0152;
+
+    const int nFrames = 1800; // 60 seconds @ 30 fps
+    const int nImu = 5400;    // 90 Hz IMU
+    std::vector<gf::GFGyroRecord> gyro;
+    std::vector<gf::GFAccelRecord> accel;
+    gyro.reserve(static_cast<size_t>(nImu));
+    accel.reserve(static_cast<size_t>(nImu));
+
+    for (int i = 0; i < nImu; ++i) {
+        const double t = i / 90.0;
+        const double wx = 0.45 * std::cos(2.0 * kPi * 2.8 * t);
+        const double wy = 0.25 * std::sin(2.0 * kPi * 0.15 * t) + 0.35 * std::sin(2.0 * kPi * 3.4 * t);
+        const double wz = 0.22 * std::cos(2.0 * kPi * 3.1 * t);
+        gyro.push_back({t, -wy, -wx, -wz});
+        accel.push_back({t, 0.0f, -1.0f, 0.0f});
+    }
+
+    std::vector<gf::GFFrameRecord> frames;
+    frames.reserve(static_cast<size_t>(nFrames));
+    for (int f = 0; f < nFrames; ++f) {
+        frames.push_back({static_cast<uint32_t>(f), f / 30.0, 0.005f, 100.0f, 0.88f, 0.0152f});
+    }
+
+    gf::TrajectoryEngine engine;
+    engine.setImuData(hdr, gyro, accel);
+    gf::StabilizerConfig cfg;
+    cfg.pitchSmoothness = 0.78;
+    cfg.yawSmoothness = 0.88;
+    cfg.rollSmoothness = 0.85;
+    cfg.horizonLockEnabled = true;
+    cfg.horizonMode = gf::HorizonMode::ActionLevel40;
+    cfg.rollingShutterCorrection = true;
+    cfg.maxZoomLimit = 1.32;
+    cfg.useConstrainedPath = true;
+
+    const auto t0 = std::chrono::steady_clock::now();
+    const auto traj = engine.solve(frames, cfg);
+    const auto t1 = std::chrono::steady_clock::now();
+    const double elapsedSec = std::chrono::duration<double>(t1 - t0).count();
+    assert(traj.valid && traj.smoothFrameQuats.size() == 1800);
+    std::printf("ConstrainedPath 60s (1800 frames) solve time = %.4f s (< 2.0 s host, << 10 s A7)\n", elapsedSec);
+    assert(elapsedSec < 2.0);
+}
+
 } // namespace
 
 int main() {
@@ -597,5 +840,8 @@ int main() {
     testActionModeActionLevel40AndFixedCrop();
     testSoftKneeMarginClampingZeroEdgeBounce();
     testHorizontalShakeSuppressionPortraitAndLandscape();
+    testConstrainedPathShakeAndPanZeroBorder();
+    testConstrainedPathPreservesSmoothInput();
+    testConstrainedPathPerformance60Sec();
     return 0;
 }

@@ -1,0 +1,10 @@
+X:/GyroStabilizer5s/build_winlibs/CMakeFiles/gf_core.dir
+X:/GyroStabilizer5s/build_winlibs/CMakeFiles/gf_core_tests.dir
+X:/GyroStabilizer5s/build_winlibs/CMakeFiles/gf_sidecar_calib_tests.dir
+X:/GyroStabilizer5s/build_winlibs/CMakeFiles/gf_stabilizer_tests.dir
+X:/GyroStabilizer5s/build_winlibs/CMakeFiles/gf_horizon_rs_autosync_tests.dir
+X:/GyroStabilizer5s/build_winlibs/CMakeFiles/gf_quality_metrics_tests.dir
+X:/GyroStabilizer5s/build_winlibs/CMakeFiles/gf_benchmark_cli.dir
+X:/GyroStabilizer5s/build_winlibs/CMakeFiles/test.dir
+X:/GyroStabilizer5s/build_winlibs/CMakeFiles/edit_cache.dir
+X:/GyroStabilizer5s/build_winlibs/CMakeFiles/rebuild_cache.dir

@@ -14,6 +14,9 @@ add_library(gf_core STATIC
     CoreCPP/src/OpticalSync.cpp
     CoreCPP/src/TranslationalStabilizer2D.cpp
     CoreCPP/src/VirtualGyroEngine.cpp
+    CoreCPP/src/QualityMetrics.cpp
+    CoreCPP/src/CalibrationRefiner.cpp
+    CoreCPP/src/ConstrainedPathOptimizer.cpp
 )
 
 target_include_directories(gf_core PUBLIC
@@ -50,6 +53,17 @@ add_executable(gf_quality_metrics_tests
     CoreCPP/tests/test_quality_metrics.cpp
 )
 target_link_libraries(gf_quality_metrics_tests PRIVATE gf_core)
+
+add_executable(gf_benchmark_cli
+    CoreCPP/tools/gf_benchmark_cli.cpp
+)
+target_link_libraries(gf_benchmark_cli PRIVATE gf_core)
+if(NOT MSVC)
+    target_compile_options(gf_benchmark_cli PRIVATE -Wall -Wextra -Wpedantic)
+    foreach(test_tgt gf_core_tests gf_sidecar_calib_tests gf_stabilizer_tests gf_horizon_rs_autosync_tests gf_quality_metrics_tests)
+        target_compile_options(${test_tgt} PRIVATE -UNDEBUG)
+    endforeach()
+endif()
 
 enable_testing()
 add_test(NAME gf_core_math_tests COMMAND gf_core_tests)
